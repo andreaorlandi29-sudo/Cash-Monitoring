@@ -1,0 +1,11 @@
+{
+  "name": "generic",
+  "delimiter": ",",
+  "date_col": "data",
+  "date_format": "%Y-%m-%d",
+  "description_col": "descrizione",
+  "amount_mode": "single",
+  "amount_col": "importo",
+  "decimal_separator": ".",
+  "thousands_separator": ""
+}
