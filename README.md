@@ -90,10 +90,46 @@ oppure con colonne dare/avere separate:
 }
 ```
 
-Poi: `--profile labanca`. Non è ancora incluso un parser PDF: i formati delle
-banche italiane sono troppo eterogenei per generalizzare senza un export
-reale come riferimento — se vuoi, mandami un estratto conto PDF/CSV reale
-(anche con i dati sensibili anonimizzati) e aggiungo il profilo giusto.
+Poi: `--profile labanca`.
+
+## Importare un estratto conto (PDF)
+
+Supportati due formati reali, entrambi via `pdfplumber` (nessun OCR: i PDF
+devono avere testo selezionabile, non essere scansioni):
+
+```bash
+python -m cashmon.importers.pdf_findomestic percorso/estratto_conto.pdf
+python -m cashmon.importers.pdf_nexi percorso/estratto_nexi.pdf
+```
+
+**Findomestic (conto corrente)**: ogni riga viene importata come movimento
+reale, con segno da colonna Uscite/Entrate. L'accredito stipendio, i
+bonifici, gli addebiti SDD e l'addebito unico Nexi/Satispay finiscono tutti
+qui e contano sul saldo.
+
+**Nexi (carta di credito a saldo)**: la carta NON addebita subito il conto —
+Nexi salda l'intero estratto in un unico addebito SDD circa 2 mesi dopo (lo
+vedrai comparire più avanti come riga "NEXI PAYMENTS" nell'estratto conto
+Findomestic di quel mese, categorizzata automaticamente "Carta di Credito").
+Per questo le singole spese della carta vengono importate come dettaglio
+"informativo": hanno la categoria e la data reali (utili per capire dove
+vanno i soldi) ma **non vengono sommate al saldo** — altrimenti la stessa
+spesa verrebbe contata due volte, una all'acquisto e una all'addebito.
+Importa comunque entrambi gli estratti (Nexi appena disponibile, Findomestic
+del mese in cui arriva l'addebito): il saldo resta corretto in ogni momento,
+e quando arriva l'addebito puoi confrontare il totale con quanto già
+categorizzato dalle singole spese.
+
+Lo stesso ragionamento vale concettualmente per Satispay (il plafond
+settimanale si azzera con un unico addebito sul conto Findomestic ogni
+lunedì) ma il collegamento con le notifiche Telegram non è ancora
+implementato — vedi Roadmap.
+
+Se in futuro cambia il layout del PDF (nuovo template della banca), l'unico
+segnale visibile è che l'import restituisce meno righe del solito o importi
+che non tornano: confronta sempre il riepilogo stampato a fine comando con i
+totali "Entrate complessive / Uscite complessive" (Findomestic) o "TOTALE
+SPESE" (Nexi) stampati sull'estratto conto stesso.
 
 ## Bot Telegram
 
@@ -144,9 +180,18 @@ dallo stesso flusso di categorizzazione.
 
 ## Roadmap non ancora implementata
 
-- Parser PDF per estratti conto (serve un esempio reale).
 - Ricezione diretta delle notifiche iPhone (Shortcut da costruire insieme).
-- Riconciliazione automatica tra movimento provvisorio (da Telegram) e riga
-  dell'estratto conto quando arriva (lo schema la supporta già via
-  `superseded_by_id`, manca solo il matcher).
-- Grafici/riepiloghi periodici.
+- Riconciliazione Satispay: le spese da notifica (Telegram) dovrebbero essere
+  registrate come movimenti reali e "provvisori" (`status='provisional'`), e
+  quando arriva l'addebito settimanale sul conto Findomestic vanno collegate
+  ad esso con `superseded_by_id` (lo schema lo supporta già, manca solo il
+  comando Telegram e il matcher — a differenza di Nexi, qui i soldi escono
+  davvero dal conto ogni settimana, non è un plafond prepagato: vedi i
+  commenti in `cashmon/categorizer.py` sulle categorie "Carta di Credito" /
+  "Satispay").
+- Grafici/riepiloghi periodici (nota: un futuro report "spesa per categoria"
+  deve escludere le categorie in `TRANSFER_CATEGORIES` — sono liquidazioni di
+  spesa già dettagliata altrove, sommarle di nuovo la conterebbe due volte).
+- Un nuovo template PDF di Findomestic/Nexi potrebbe rompere silenziosamente
+  il parser: confronta sempre i totali importati con quelli stampati
+  sull'estratto (vedi sopra) dopo il primo import di un nuovo mese.

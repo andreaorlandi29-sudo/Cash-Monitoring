@@ -4,6 +4,7 @@ from cashmon.ledger import (
     balance_at,
     compute_import_hash,
     forecast_at,
+    get_last_actual_date,
     match_projection,
     supersede_transaction,
 )
@@ -64,6 +65,16 @@ def test_forecast_at_does_not_double_count_matched_plus_unmatched(seeded_conn):
     # base = balance_at(last actual = 2026-02-01) = 1_000_000 - 30000
     # plus unmatched projection (march) = -30000
     assert forecast == 1_000_000 - 30000 - 30000
+
+
+def test_balance_at_excludes_rows_flagged_as_not_counting(seeded_conn):
+    # e.g. an itemized Nexi card purchase: real spend for category reporting,
+    # but not yet a movement of money out of the checking account.
+    add_transaction(
+        seeded_conn, "2026-01-05", -5000, "Amazon.it", source="nexi_card", counts_toward_balance=0
+    )
+    assert balance_at(seeded_conn, "2026-01-05") == 1_000_000
+    assert get_last_actual_date(seeded_conn) == "2026-01-01"  # falls back to initial date
 
 
 def test_compute_import_hash_is_stable_and_normalizes_description():

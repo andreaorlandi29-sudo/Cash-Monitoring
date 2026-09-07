@@ -18,10 +18,19 @@ CATEGORIES = [
     "Utenze",
     "Salute",
     "Svago",
+    "Shopping",
     "Stipendio",
     "Bonifico",
+    "Carta di Credito",
+    "Satispay",
     "Altro",
 ]
+
+# These categories are settlements of spend that's already itemized elsewhere
+# (a Nexi card's lump SDD debit, a Satispay weekly settlement) -- not a spend
+# category of their own. A future "spend by category" report should exclude
+# them to avoid double-counting the same money against the itemized rows.
+TRANSFER_CATEGORIES = {"Carta di Credito", "Satispay"}
 
 # (pattern, category, priority) -- pattern is matched as a substring against the
 # normalized (uppercased, whitespace-collapsed) description.
@@ -54,8 +63,16 @@ SEED_RULES = [
     ("FARMACIA", "Salute", SEED_PRIORITY),
     ("NETFLIX", "Svago", SEED_PRIORITY),
     ("SPOTIFY", "Svago", SEED_PRIORITY),
-    ("AMAZON PRIME", "Svago", SEED_PRIORITY),
+    ("APPLE.COM", "Svago", SEED_PRIORITY),
+    ("PRIME VIDEO", "Svago", SEED_PRIORITY),
+    ("DELIVEROO", "Alimentari", SEED_PRIORITY),
+    ("RYANAIR", "Trasporti", SEED_PRIORITY),
+    ("HERTZ", "Trasporti", SEED_PRIORITY),
+    ("AMAZON PRIME", "Svago", SEED_PRIORITY - 10),  # more specific than generic AMAZON below
+    ("AMAZON", "Shopping", SEED_PRIORITY),
     ("STIPENDIO", "Stipendio", SEED_PRIORITY),
+    ("NEXI PAYMENTS", "Carta di Credito", SEED_PRIORITY),
+    ("SATISPAY", "Satispay", SEED_PRIORITY),
     ("BONIFICO", "Bonifico", SEED_PRIORITY + 100),  # generic fallback, checked last
 ]
 

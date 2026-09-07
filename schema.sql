@@ -17,9 +17,15 @@ CREATE TABLE IF NOT EXISTS transactions (
     category TEXT,                         -- NULL means "needs categorization"
     status TEXT NOT NULL DEFAULT 'confirmed'
         CHECK (status IN ('provisional', 'confirmed')),
-    source TEXT NOT NULL,                  -- 'seed' | 'csv_import' | 'telegram'
+    source TEXT NOT NULL,                  -- 'seed' | 'csv_import' | 'telegram' | 'nexi_card' | 'findomestic_pdf'
     import_hash TEXT UNIQUE,               -- dedup key; NULL allowed for rows that don't need it
     superseded_by_id INTEGER REFERENCES transactions(id),
+    -- 0 for rows that are itemized spend detail but not a separate movement of
+    -- money out of the checking account (e.g. a Nexi credit-card line item --
+    -- Nexi settles the whole month in one lump SDD debit ~2 months later,
+    -- which is imported separately, from the bank statement, WITH this flag
+    -- at 1). Recording both would double-count the same money.
+    counts_toward_balance INTEGER NOT NULL DEFAULT 1 CHECK (counts_toward_balance IN (0, 1)),
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

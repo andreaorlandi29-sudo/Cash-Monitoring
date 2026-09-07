@@ -21,13 +21,16 @@ def get_initial_balance_date(conn: sqlite3.Connection) -> str:
 
 def balance_at(conn: sqlite3.Connection, date: str) -> int:
     """Real balance at `date`: initial balance plus every non-superseded actual
-    transaction on or before that date."""
+    transaction on or before that date that represents real money movement
+    (counts_toward_balance=1 -- see the transactions table comment for why a
+    row can be excluded, e.g. an itemized Nexi card purchase whose cash
+    impact is recorded separately, as the lump monthly settlement)."""
     initial = get_initial_balance_cents(conn)
     row = conn.execute(
         """
         SELECT COALESCE(SUM(amount_cents), 0) AS total
         FROM transactions
-        WHERE date <= ? AND superseded_by_id IS NULL
+        WHERE date <= ? AND superseded_by_id IS NULL AND counts_toward_balance = 1
         """,
         (date,),
     ).fetchone()
@@ -36,7 +39,10 @@ def balance_at(conn: sqlite3.Connection, date: str) -> int:
 
 def get_last_actual_date(conn: sqlite3.Connection) -> str:
     row = conn.execute(
-        "SELECT MAX(date) AS last_date FROM transactions WHERE superseded_by_id IS NULL"
+        """
+        SELECT MAX(date) AS last_date FROM transactions
+        WHERE superseded_by_id IS NULL AND counts_toward_balance = 1
+        """
     ).fetchone()
     return row["last_date"] or get_initial_balance_date(conn)
 
@@ -90,6 +96,7 @@ def add_transaction(
     category: Optional[str] = None,
     status: str = "confirmed",
     import_hash: Optional[str] = None,
+    counts_toward_balance: int = 1,
 ) -> InsertResult:
     """Insert an actual transaction. If import_hash collides with an existing
     row, this is a no-op (idempotent re-import) rather than an error."""
@@ -98,10 +105,10 @@ def add_transaction(
     try:
         cur = conn.execute(
             """
-            INSERT INTO transactions (date, amount_cents, description, category, status, source, import_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO transactions (date, amount_cents, description, category, status, source, import_hash, counts_toward_balance)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (date, amount_cents, description, category, status, source, import_hash),
+            (date, amount_cents, description, category, status, source, import_hash, counts_toward_balance),
         )
         conn.commit()
         return InsertResult(transaction_id=cur.lastrowid, inserted=True)
