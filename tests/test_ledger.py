@@ -67,6 +67,17 @@ def test_forecast_at_does_not_double_count_matched_plus_unmatched(seeded_conn):
     assert forecast == 1_000_000 - 30000 - 30000
 
 
+def test_dedupe_false_allows_identical_repeated_interactive_entries(seeded_conn):
+    # Two real, separate coffees bought the same day with the same typed
+    # description must both be kept -- not silently collapsed into one.
+    first = add_transaction(seeded_conn, "2026-01-05", -350, "Bar", source="telegram", dedupe=False)
+    second = add_transaction(seeded_conn, "2026-01-05", -350, "Bar", source="telegram", dedupe=False)
+    assert first.inserted is True
+    assert second.inserted is True
+    assert first.transaction_id != second.transaction_id
+    assert balance_at(seeded_conn, "2026-01-05") == 1_000_000 - 700
+
+
 def test_balance_at_excludes_rows_flagged_as_not_counting(seeded_conn):
     # e.g. an itemized Nexi card purchase: real spend for category reporting,
     # but not yet a movement of money out of the checking account.

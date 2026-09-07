@@ -8,14 +8,19 @@ Commands:
   /proiezione [giorni]   projected balance N days out (default 30)
 
 Free text:
-  "spesa 12,50 Esselunga"    logs an expense
-  "entrata 1200 Stipendio"   logs an income
+  "spesa 12,50 Esselunga"        logs an expense
+  "entrata 1200 Stipendio"       logs an income
+  "satispay spesa 12,50 Bar"     logs a Satispay purchase (see README: this
+                                  doesn't move the checking-account balance
+                                  yet -- Satispay nets weekly)
+  "satispay entrata 20 da Mario" logs a P2P payment received via Satispay
+                                  (same reasoning, doesn't land in the
+                                  checking account either)
 
 If the description doesn't match any categorization rule, the bot asks which
 category it is via inline buttons, and remembers the answer for next time.
 """
 import logging
-import re
 from datetime import date, timedelta
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -30,14 +35,13 @@ from telegram.ext import (
 
 from cashmon import config as app_config
 from cashmon import db
-from cashmon.bot.formatting import format_eur, parse_amount_to_cents
+from cashmon.bot.entry_parsing import parse_entry
+from cashmon.bot.formatting import format_eur
 from cashmon.categorizer import CATEGORIES, categorize, learn_rule
 from cashmon.ledger import add_transaction, balance_at, forecast_at
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-ENTRY_RE = re.compile(r"^(spesa|entrata)\s+([\d.,]+)\s+(.+)$", re.IGNORECASE)
 
 
 def owner_only(handler):
@@ -67,7 +71,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/proiezione [giorni] - saldo previsto\n\n"
         "Per registrare un movimento scrivi ad es.:\n"
         "spesa 12,50 Esselunga\n"
-        "entrata 1200 Stipendio"
+        "entrata 1200 Stipendio\n"
+        "satispay spesa 12,50 Bar\n"
+        "satispay entrata 20 da Mario"
     )
 
 
@@ -116,45 +122,35 @@ async def ask_category(update: Update, context: ContextTypes.DEFAULT_TYPE, trans
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conn = context.bot_data["conn"]
     text = update.effective_message.text or ""
-    match = ENTRY_RE.match(text.strip())
-    if not match:
+    entry = parse_entry(text)
+    if entry is None:
         await update.effective_message.reply_text(
-            'Non ho capito. Usa il formato: "spesa 12,50 Esselunga" oppure "entrata 1200 Stipendio".'
+            'Non ho capito. Usa il formato: "spesa 12,50 Esselunga", "entrata 1200 Stipendio" '
+            'oppure, per Satispay, "satispay spesa 12,50 Bar" / "satispay entrata 20 da Mario".'
         )
         return
 
-    kind, amount_raw, description = match.groups()
-    try:
-        cents = parse_amount_to_cents(amount_raw)
-    except ValueError:
-        await update.effective_message.reply_text(f"Importo non valido: {amount_raw}")
-        return
-    if kind.lower() == "spesa":
-        cents = -abs(cents)
-    else:
-        cents = abs(cents)
-
-    category = categorize(conn, description)
+    category = categorize(conn, entry.description)
     result = add_transaction(
         conn,
         date=date.today().isoformat(),
-        amount_cents=cents,
-        description=description,
-        source="telegram",
+        amount_cents=entry.amount_cents,
+        description=entry.description,
+        source=entry.source,
         category=category,
         status="confirmed",
+        counts_toward_balance=entry.counts_toward_balance,
+        dedupe=False,  # interactive entries: two identical small purchases in one day are real, not duplicates
     )
-    if not result.inserted:
-        await update.effective_message.reply_text("Movimento già registrato (ignorato duplicato).")
-        return
 
+    suffix = "" if entry.counts_toward_balance else " (Satispay, non ancora sul conto)"
     if category:
         await update.effective_message.reply_text(
-            f"Registrato: {format_eur(cents)} - {description} [{category}]"
+            f"Registrato: {format_eur(entry.amount_cents)} - {entry.description} [{category}]{suffix}"
         )
     else:
-        await update.effective_message.reply_text(f"Registrato: {format_eur(cents)} - {description}")
-        await ask_category(update, context, result.transaction_id, description)
+        await update.effective_message.reply_text(f"Registrato: {format_eur(entry.amount_cents)} - {entry.description}{suffix}")
+        await ask_category(update, context, result.transaction_id, entry.description)
 
 
 @owner_only

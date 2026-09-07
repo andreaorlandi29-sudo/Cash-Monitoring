@@ -97,11 +97,24 @@ def add_transaction(
     status: str = "confirmed",
     import_hash: Optional[str] = None,
     counts_toward_balance: int = 1,
+    dedupe: bool = True,
 ) -> InsertResult:
     """Insert an actual transaction. If import_hash collides with an existing
-    row, this is a no-op (idempotent re-import) rather than an error."""
-    if import_hash is None:
-        import_hash = compute_import_hash(source, date, amount_cents, description)
+    row, this is a no-op (idempotent re-import) rather than an error.
+
+    Set dedupe=False for interactively-entered rows (Telegram), where two
+    genuinely separate transactions can share date/amount/description (two
+    identical coffees bought the same day) -- hashing those would silently
+    drop the second one as a "duplicate". This inserts import_hash=NULL,
+    which SQLite's UNIQUE constraint never treats as a collision. Statement/
+    CSV imports must keep dedupe=True (the default): there, re-running the
+    same import being a no-op is the whole point.
+    """
+    if dedupe:
+        if import_hash is None:
+            import_hash = compute_import_hash(source, date, amount_cents, description)
+    else:
+        import_hash = None
     try:
         cur = conn.execute(
             """

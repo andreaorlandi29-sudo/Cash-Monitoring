@@ -161,34 +161,64 @@ Testo libero per registrare un movimento:
 ```
 spesa 12,50 Esselunga
 entrata 1200 Stipendio
+satispay spesa 12,50 Bar
+satispay entrata 20 da Mario
 ```
 
 Se la descrizione non corrisponde a nessuna regola, il bot chiede la
 categoria con dei bottoni; la risposta viene ricordata per le volte
-successive.
+successive. A differenza di un import da estratto conto, due messaggi
+identici (stesso importo, stessa descrizione, stesso giorno — capita spesso
+con Satispay, es. due caffè da 1,50 €) vengono registrati entrambi: la
+deduplica per hash ha senso solo per un file che potresti reimportare per
+sbaglio, non per due spese reali scritte a mano.
+
+### Satispay: come viene trattato
+
+Satispay non è un conto prepagato che "ricarichi": ogni settimana netta
+quanto hai speso meno quanto hai ricevuto da altri utenti, e addebita sul
+conto Findomestic solo l'eventuale differenza a tuo debito — se ricevi più
+di quanto spendi, l'eccesso resta come credito usabile la settimana dopo
+(niente arriva sul conto). Per questo:
+
+- `satispay spesa ...` e `satispay entrata ...` registrano la voce con la
+  categoria e la data reali (utili per sapere dove vanno i soldi) ma **non
+  toccano il saldo** (`/saldo`) — la logica è la stessa di Nexi: la cifra che
+  esce davvero dal conto è solo l'addebito settimanale, che l'import
+  dell'estratto Findomestic riconosce già da solo (pattern "SATISPAY",
+  categoria automatica "Satispay").
+- **Limite consapevole**: `/saldo` mostra il saldo del conto corrente, non
+  tutto il tuo patrimonio. Se ricevi 50 € via Satispay e non li spendi,
+  quei 50 € sono comunque tuoi ma non compaiono da nessuna parte finché non
+  vengono spesi o (mai, in pratica) accreditati sul conto. Se vuoi vedere
+  anche il "credito Satispay non ancora liquidato", è calcolabile così e
+  potrei aggiungerlo come riga in più su `/saldo` o come comando `/satispay`
+  dedicato — dimmelo se ti interessa:
+  ```sql
+  SELECT COALESCE(SUM(amount_cents), 0)
+  FROM transactions
+  WHERE source = 'satispay' AND counts_toward_balance = 0;
+  -- meno la somma di quanto già addebitato dagli SDD settimanali importati
+  -- dall'estratto conto (categoria 'Satispay', counts_toward_balance = 1)
+  ```
 
 ## Notifiche di spesa da iPhone
 
 Non incluso in questa prima versione (serve una spesa reale, anonimizzata,
 come esempio per capire il formato). La strada più semplice e gratuita è
-una **Shortcut iOS** agganciata alle notifiche della tua banca/carta
+una **Shortcut iOS** agganciata alle notifiche della tua banca/carta/Satispay
 (automazione "quando ricevo una notifica da app X"), che estrae importo ed
 esercente e li invia con una richiesta HTTP al metodo Telegram
 `sendMessage` verso il tuo stesso bot, nel formato `spesa <importo> <esercente>`
-— così arriva nel bot esattamente come un messaggio scritto a mano, e passa
+(o `satispay spesa <importo> <esercente>` per le notifiche di Satispay) —
+così arriva nel bot esattamente come un messaggio scritto a mano, e passa
 dallo stesso flusso di categorizzazione.
 
 ## Roadmap non ancora implementata
 
 - Ricezione diretta delle notifiche iPhone (Shortcut da costruire insieme).
-- Riconciliazione Satispay: le spese da notifica (Telegram) dovrebbero essere
-  registrate come movimenti reali e "provvisori" (`status='provisional'`), e
-  quando arriva l'addebito settimanale sul conto Findomestic vanno collegate
-  ad esso con `superseded_by_id` (lo schema lo supporta già, manca solo il
-  comando Telegram e il matcher — a differenza di Nexi, qui i soldi escono
-  davvero dal conto ogni settimana, non è un plafond prepagato: vedi i
-  commenti in `cashmon/categorizer.py` sulle categorie "Carta di Credito" /
-  "Satispay").
+- Comando (`/satispay` o riga extra su `/saldo`) per vedere il credito
+  Satispay non ancora liquidato — vedi "Satispay: come viene trattato" sopra.
 - Grafici/riepiloghi periodici (nota: un futuro report "spesa per categoria"
   deve escludere le categorie in `TRANSFER_CATEGORIES` — sono liquidazioni di
   spesa già dettagliata altrove, sommarle di nuovo la conterebbe due volte).
