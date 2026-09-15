@@ -40,6 +40,12 @@ Free text:
                                   replaces projection #3's fields entirely
                                   (not a partial edit)
 
+If none of the above match, and ANTHROPIC_API_KEY is set, the message falls
+through to cashmon.bot.nlu: a conversational fallback that asks Claude to
+extract the same structured intent from freer Italian phrasing (see
+try_conversational_fallback). Without that key, an unmatched message just
+gets the rigid-format help text -- the bot still works exactly as before.
+
 If the description doesn't match any categorization rule, the bot asks which
 category it is via inline buttons, and remembers the answer for next time.
 """
@@ -58,6 +64,7 @@ from telegram.ext import (
 
 from cashmon import config as app_config
 from cashmon import db
+from cashmon.bot import nlu
 from cashmon.bot.entry_parsing import (
     parse_balance_forecast_request,
     parse_entry,
@@ -259,6 +266,101 @@ async def send_balance_forecast(update: Update, context: ContextTypes.DEFAULT_TY
     await update.effective_message.reply_text("\n".join(lines))
 
 
+async def record_transaction(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    description: str,
+    amount_cents: int,
+    source: str,
+    counts_toward_balance: int,
+    entry_date: str = None,
+) -> None:
+    """Shared by the rigid "spesa/entrata" parser and the conversational NLU
+    fallback -- both end up creating the same kind of row the same way."""
+    conn = context.bot_data["conn"]
+    entry_date = entry_date or date.today().isoformat()
+    category = categorize(conn, description)
+    result = add_transaction(
+        conn,
+        date=entry_date,
+        amount_cents=amount_cents,
+        description=description,
+        source=source,
+        account_id=context.bot_data["checking_account_id"],
+        category=category,
+        status="confirmed",
+        counts_toward_balance=counts_toward_balance,
+        dedupe=False,  # interactive entries: two identical small purchases in one day are real, not duplicates
+    )
+
+    suffix = "" if counts_toward_balance else " (Satispay, non ancora sul conto)"
+    if category:
+        await update.effective_message.reply_text(f"Registrato: {format_eur(amount_cents)} - {description} [{category}]{suffix}")
+    else:
+        await update.effective_message.reply_text(f"Registrato: {format_eur(amount_cents)} - {description}{suffix}")
+        await ask_category(update, context, result.transaction_id, description, amount_cents=amount_cents, date_str=entry_date)
+
+
+RIGID_FORMAT_HELP = (
+    'Non ho capito. Usa il formato: "spesa 12,50 Esselunga", "entrata 1200 Stipendio", '
+    '"satispay spesa 12,50 Bar" / "satispay entrata 20 da Mario", '
+    '"previsione spesa 150 il 2026-10-05 Rata condominio", "previsione saldo al 2026-12-01", '
+    '"previsione elimina <numero>" oppure "previsione modifica <numero> spesa|entrata <importo> il <data> <descrizione>". '
+    "Usa /previsioni per vedere i numeri. Puoi anche scrivere più liberamente, es. "
+    '"ho speso 12 euro da Esselunga" o "quanto avrò a dicembre?".'
+)
+
+
+async def try_conversational_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    """Last resort when none of the rigid formats match: asks Claude to
+    extract the same structured intent from free Italian phrasing. Returns
+    True if it handled the message (recognized or not), False if the
+    fallback itself is unavailable (no API key, or the call failed) and the
+    caller should show the plain rigid-format help instead."""
+    if not app_config.ANTHROPIC_API_KEY:
+        return False
+
+    try:
+        result = nlu.interpret(text, date.today().isoformat())
+    except Exception:
+        logger.exception("Interpretazione discorsiva del messaggio fallita")
+        return False
+
+    if not result.recognized:
+        reason = f" ({result.reason_unclear})" if result.reason_unclear else ""
+        await update.effective_message.reply_text(f"Non ho capito bene{reason}. Puoi riformulare con più dettagli?")
+        return True
+
+    if result.kind == "richiesta_saldo" and result.date:
+        await send_balance_forecast(update, context, result.date)
+        return True
+
+    if result.kind == "previsione" and result.amount_cents is not None and result.date:
+        conn = context.bot_data["conn"]
+        description = result.description or "Previsione"
+        category = categorize(conn, description)
+        add_projection(conn, result.date, result.amount_cents, description, category)
+        suffix = f" [{category}]" if category else ""
+        await update.effective_message.reply_text(
+            f"Previsione registrata: {format_eur(result.amount_cents)} il {result.date} - {description}{suffix}"
+        )
+        return True
+
+    if result.kind == "movimento" and result.amount_cents is not None:
+        description = result.description or "Movimento"
+        source = "satispay" if result.is_satispay else "telegram"
+        counts_toward_balance = 0 if result.is_satispay else 1
+        await record_transaction(
+            update, context, description, result.amount_cents, source, counts_toward_balance, entry_date=result.date
+        )
+        return True
+
+    # Recognized as relevant but missing a piece we can't safely guess (e.g.
+    # "previsione" with no date) -- ask rather than silently dropping it.
+    await update.effective_message.reply_text("Ho capito di cosa parli ma mi manca un dettaglio (importo o data). Puoi essere più preciso?")
+    return True
+
+
 @owner_only
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conn = context.bot_data["conn"]
@@ -302,41 +404,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     entry = parse_entry(text)
-    if entry is None:
-        await update.effective_message.reply_text(
-            'Non ho capito. Usa il formato: "spesa 12,50 Esselunga", "entrata 1200 Stipendio", '
-            '"satispay spesa 12,50 Bar" / "satispay entrata 20 da Mario", '
-            '"previsione spesa 150 il 2026-10-05 Rata condominio", "previsione saldo al 2026-12-01", '
-            '"previsione elimina <numero>" oppure "previsione modifica <numero> spesa|entrata <importo> il <data> <descrizione>". '
-            "Usa /previsioni per vedere i numeri."
-        )
+    if entry is not None:
+        await record_transaction(update, context, entry.description, entry.amount_cents, entry.source, entry.counts_toward_balance)
         return
 
-    category = categorize(conn, entry.description)
-    result = add_transaction(
-        conn,
-        date=date.today().isoformat(),
-        amount_cents=entry.amount_cents,
-        description=entry.description,
-        source=entry.source,
-        account_id=context.bot_data["checking_account_id"],
-        category=category,
-        status="confirmed",
-        counts_toward_balance=entry.counts_toward_balance,
-        dedupe=False,  # interactive entries: two identical small purchases in one day are real, not duplicates
-    )
+    if await try_conversational_fallback(update, context, text):
+        return
 
-    suffix = "" if entry.counts_toward_balance else " (Satispay, non ancora sul conto)"
-    if category:
-        await update.effective_message.reply_text(
-            f"Registrato: {format_eur(entry.amount_cents)} - {entry.description} [{category}]{suffix}"
-        )
-    else:
-        await update.effective_message.reply_text(f"Registrato: {format_eur(entry.amount_cents)} - {entry.description}{suffix}")
-        await ask_category(
-            update, context, result.transaction_id, entry.description,
-            amount_cents=entry.amount_cents, date_str=date.today().isoformat(),
-        )
+    await update.effective_message.reply_text(RIGID_FORMAT_HELP)
 
 
 @owner_only

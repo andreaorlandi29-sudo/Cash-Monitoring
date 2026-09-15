@@ -200,6 +200,32 @@ processo persistente (es. un free tier con worker sempre attivo — evita i
 free tier "serverless" che dormono, altrimenti perdi i messaggi nel
 frattempo).
 
+### Capire il linguaggio discorsivo (opzionale)
+
+Oltre ai formati rigidi qui sotto, il bot capisce anche frasi più libere —
+"ho speso 12 euro da Esselunga stamattina", "domani mi arrivano 1200 di
+stipendio", "quanto avrò a dicembre?" — appoggiandosi all'API di Claude
+(modulo `cashmon/bot/nlu.py`) **solo quando** il messaggio non combacia con
+nessun formato rigido: quelli restano gratuiti e vengono sempre provati
+per primi.
+
+Per attivarlo, crea una API key su [console.anthropic.com](https://console.anthropic.com)
+(Settings → API Keys) e aggiungila a `.env`:
+```
+ANTHROPIC_API_KEY=sk-ant-...
+```
+Richiede un metodo di pagamento collegato all'account (a differenza del bot
+Telegram, che è gratis) — controlla i consumi da Settings → Usage le prime
+volte. Con il modello di default (`claude-haiku-4-5`, cambiabile con
+`NLU_MODEL` in `.env`) il costo per messaggio interpretato è nell'ordine di
+frazioni di centesimo, adatto a un uso personale.
+
+**Senza questa chiave il bot funziona esattamente come prima**, semplicemente
+senza capire le frasi libere — non è un requisito, è un'aggiunta. Se il
+messaggio non è chiaro nemmeno per Claude (manca l'importo, non è chiaro se
+spesa o entrata, ecc.), il bot te lo dice e ti chiede di essere più preciso
+invece di indovinare.
+
 Comandi disponibili (compaiono anche nel menu "/" di Telegram vicino al
 campo di testo, con una breve descrizione — utile se te li dimentichi):
 
