@@ -19,12 +19,22 @@ Free text:
   "satispay entrata 20 da Mario" logs a P2P payment received via Satispay
                                   (same reasoning, doesn't land in the
                                   checking account either)
+  "previsione spesa 150 il 2026-10-05 Rata condominio"
+                                  logs a planned future expense/income for a
+                                  known date (one date per message)
+  "previsione saldo al 2026-12-01"
+                                  projected balance: today's real balance,
+                                  plus every logged projection, plus an
+                                  automatic Utenze estimate (trailing
+                                  monthly average) for any month in between
+                                  that has no explicit Utenze projection --
+                                  see ledger.forecast_breakdown
 
 If the description doesn't match any categorization rule, the bot asks which
 category it is via inline buttons, and remembers the answer for next time.
 """
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -38,11 +48,22 @@ from telegram.ext import (
 
 from cashmon import config as app_config
 from cashmon import db
-from cashmon.bot.entry_parsing import parse_entry
+from cashmon.bot.entry_parsing import parse_balance_forecast_request, parse_entry, parse_projection
 from cashmon.bot.formatting import format_eur
 from cashmon.categorizer import CATEGORIES, categorize, learn_rule
-from cashmon.ledger import add_transaction, balance_at, forecast_at, get_account_id, list_accounts, total_balance_at
+from cashmon.ledger import (
+    add_projection,
+    add_transaction,
+    balance_at,
+    forecast_at,
+    forecast_breakdown,
+    get_account_id,
+    list_accounts,
+    total_balance_at,
+)
 from cashmon.seed import DEFAULT_ACCOUNT_NAME
+
+BALANCE_FORECAST_CATEGORY = "Utenze"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -78,7 +99,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "spesa 12,50 Esselunga\n"
         "entrata 1200 Stipendio\n"
         "satispay spesa 12,50 Bar\n"
-        "satispay entrata 20 da Mario"
+        "satispay entrata 20 da Mario\n\n"
+        "Per una previsione futura:\n"
+        "previsione spesa 150 il 2026-10-05 Rata condominio\n"
+        "previsione saldo al 2026-12-01"
     )
 
 
@@ -167,15 +191,61 @@ async def categorizza(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await send_next_uncategorized(update, context)
 
 
+async def send_balance_forecast(update: Update, context: ContextTypes.DEFAULT_TYPE, target_date: str) -> None:
+    try:
+        datetime.strptime(target_date, "%Y-%m-%d")
+    except ValueError:
+        await update.effective_message.reply_text(f"Data non valida: {target_date}")
+        return
+
+    conn = context.bot_data["conn"]
+    account_id = context.bot_data["checking_account_id"]
+    result = forecast_breakdown(conn, date.today().isoformat(), target_date, account_id, BALANCE_FORECAST_CATEGORY)
+
+    lines = [f"Saldo oggi: {format_eur(result['balance_today_cents'])}"]
+    if result["projections_cents"]:
+        lines.append(f"Previsioni inserite: {format_eur(result['projections_cents'])}")
+    basis = result["category_avg_basis_months"]
+    if result["category_gap_months"] and basis > 0:
+        low_confidence = f" (stima su solo {basis} mes{'e' if basis == 1 else 'i'} di storico, poco affidabile)" if basis < 3 else ""
+        lines.append(
+            f"{result['category']} stimate ({result['category_gap_months']} mesi × "
+            f"{format_eur(result['category_avg_cents'])} medi){low_confidence}: "
+            f"{format_eur(result['category_estimate_cents'])}"
+        )
+    elif result["category_gap_months"] and basis == 0:
+        lines.append(f"({result['category']}: nessuno storico ancora per stimarla)")
+    lines.append(f"Previsione al {target_date}: {format_eur(result['total_cents'])}")
+    await update.effective_message.reply_text("\n".join(lines))
+
+
 @owner_only
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conn = context.bot_data["conn"]
     text = update.effective_message.text or ""
+
+    forecast_target = parse_balance_forecast_request(text)
+    if forecast_target:
+        await send_balance_forecast(update, context, forecast_target)
+        return
+
+    projection = parse_projection(text)
+    if projection:
+        category = categorize(conn, projection.description)
+        add_projection(conn, projection.date, projection.amount_cents, projection.description, category)
+        suffix = f" [{category}]" if category else ""
+        await update.effective_message.reply_text(
+            f"Previsione registrata: {format_eur(projection.amount_cents)} il {projection.date} - "
+            f"{projection.description}{suffix}"
+        )
+        return
+
     entry = parse_entry(text)
     if entry is None:
         await update.effective_message.reply_text(
-            'Non ho capito. Usa il formato: "spesa 12,50 Esselunga", "entrata 1200 Stipendio" '
-            'oppure, per Satispay, "satispay spesa 12,50 Bar" / "satispay entrata 20 da Mario".'
+            'Non ho capito. Usa il formato: "spesa 12,50 Esselunga", "entrata 1200 Stipendio", '
+            '"satispay spesa 12,50 Bar" / "satispay entrata 20 da Mario", '
+            '"previsione spesa 150 il 2026-10-05 Rata condominio" oppure "previsione saldo al 2026-12-01".'
         )
         return
 

@@ -193,3 +193,108 @@ def match_projection(conn: sqlite3.Connection, projection_id: int, transaction_i
         (transaction_id, projection_id),
     )
     conn.commit()
+
+
+def _shift_year_month(year_month: str, delta_months: int) -> str:
+    """'2026-08' shifted by -6 -> '2026-02'."""
+    y, m = (int(p) for p in year_month.split("-"))
+    total = y * 12 + (m - 1) + delta_months
+    y2, m2 = divmod(total, 12)
+    return f"{y2:04d}-{m2 + 1:02d}"
+
+
+def _year_months_between(start_year_month: str, end_year_month: str):
+    """'YYYY-MM' strings strictly after `start_year_month`, up to and
+    including `end_year_month` (empty if end <= start)."""
+    y1, m1 = (int(p) for p in start_year_month.split("-"))
+    y2, m2 = (int(p) for p in end_year_month.split("-"))
+    n1, n2 = y1 * 12 + (m1 - 1), y2 * 12 + (m2 - 1)
+    return [f"{n // 12:04d}-{n % 12 + 1:02d}" for n in range(n1 + 1, n2 + 1)]
+
+
+def average_monthly_category_spend(
+    conn: sqlite3.Connection, account_id: int, category: str, as_of_date: str, months_lookback: int = 6
+):
+    """Average monthly amount (signed cents; negative for an expense
+    category) for `category` on `account_id`, over the trailing
+    `months_lookback` months ending at `as_of_date`.
+
+    Divides by the number of DISTINCT months that actually have data, not by
+    `months_lookback` -- with one month of history, dividing by 6 would
+    understate the average sixfold. Returns (avg_cents, months_with_data) so
+    the caller can flag a low-confidence estimate (few months of history).
+    """
+    cutoff_year_month = _shift_year_month(as_of_date[:7], -months_lookback)
+    row = conn.execute(
+        """
+        SELECT COALESCE(SUM(amount_cents), 0) AS total,
+               COUNT(DISTINCT substr(date, 1, 7)) AS months
+        FROM transactions
+        WHERE account_id = ? AND category = ? AND counts_toward_balance = 1
+          AND superseded_by_id IS NULL AND substr(date, 1, 7) >= ?
+        """,
+        (account_id, category, cutoff_year_month),
+    ).fetchone()
+    months = row["months"] or 0
+    if months == 0:
+        return 0, 0
+    return row["total"] // months, months
+
+
+def forecast_breakdown(
+    conn: sqlite3.Connection,
+    today: str,
+    target_date: str,
+    account_id: int,
+    category: str,
+    months_lookback: int = 6,
+) -> dict:
+    """Projects the balance at `target_date` from three ingredients:
+
+    1. Today's real balance.
+    2. Every explicit unmatched projection dated on or before `target_date`
+       (any category -- these are things the user already told the bot
+       about, e.g. "previsione spesa ... Rata condominio").
+    3. An automatic estimate for `category` (e.g. "Utenze"), based on its
+       trailing average monthly spend, for every month between the last
+       actual transaction and `target_date` that does NOT already have an
+       explicit unmatched projection in that category.
+
+    That last condition is what keeps this from double-counting: a month
+    where the user already logged an expected Utenze bill contributes that
+    bill's real amount (via ingredient 2) and nothing from the average (it's
+    excluded from ingredient 3), rather than both.
+    """
+    balance_today_cents = balance_at(conn, today, account_id)
+
+    projections_row = conn.execute(
+        "SELECT COALESCE(SUM(amount_cents), 0) AS total FROM projections WHERE date <= ? AND matched_transaction_id IS NULL",
+        (target_date,),
+    ).fetchone()
+    projections_cents = projections_row["total"]
+
+    last_actual = get_last_actual_date(conn, account_id)
+    avg_cents, avg_basis_months = average_monthly_category_spend(conn, account_id, category, last_actual, months_lookback)
+
+    all_months = _year_months_between(last_actual[:7], target_date[:7])
+    covered_rows = conn.execute(
+        """
+        SELECT DISTINCT substr(date, 1, 7) AS ym FROM projections
+        WHERE category = ? AND matched_transaction_id IS NULL AND date <= ?
+        """,
+        (category, target_date),
+    ).fetchall()
+    covered_months = {r["ym"] for r in covered_rows}
+    gap_months = [m for m in all_months if m not in covered_months]
+    category_estimate_cents = avg_cents * len(gap_months)
+
+    return {
+        "balance_today_cents": balance_today_cents,
+        "projections_cents": projections_cents,
+        "category": category,
+        "category_avg_cents": avg_cents,
+        "category_avg_basis_months": avg_basis_months,
+        "category_gap_months": len(gap_months),
+        "category_estimate_cents": category_estimate_cents,
+        "total_cents": balance_today_cents + projections_cents + category_estimate_cents,
+    }

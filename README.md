@@ -19,7 +19,12 @@ categorizzazione automatica, e proiezioni future che vengono "sovrascritte"
 - **`categorization_rules`**: regole di categorizzazione automatica (per
   sottostringa sulla descrizione normalizzata). Le risposte date via Telegram
   vengono salvate come nuove regole, quindi lo stesso esercente non viene più
-  richiesto una seconda volta.
+  richiesto una seconda volta. Se aggiungi una nuova regola (es. un nuovo
+  esercente/categoria in `cashmon/categorizer.py`) che avrebbe già dovuto
+  matchare movimenti importati in passato, lancia
+  `python -m cashmon.recategorize` per applicarla retroattivamente invece di
+  ricategorizzare a mano dal bot ogni riga già presente (non tocca mai una
+  riga già categorizzata).
 - Ogni importo è salvato come **centesimi interi** (mai float).
 - Ogni riga importata ha un **hash di deduplica** (fonte + data + importo +
   descrizione normalizzata): reimportare lo stesso estratto conto è
@@ -219,6 +224,46 @@ identici (stesso importo, stessa descrizione, stesso giorno — capita spesso
 con Satispay, es. due caffè da 1,50 €) vengono registrati entrambi: la
 deduplica per hash ha senso solo per un file che potresti reimportare per
 sbaglio, non per due spese reali scritte a mano.
+
+### Previsioni future
+
+Per una spesa o un'entrata che sai già che arriverà in una data precisa (una
+rata condominiale, uno stipendio con data nota, ecc.):
+
+```
+previsione spesa 150 il 2026-10-05 Rata condominio
+previsione entrata 1200 il 2026-11-27 Tredicesima
+```
+
+Una data per messaggio — per più rate (es. 4 scadenze condominiali), manda 4
+messaggi, uno per ciascuna. La previsione resta visibile finché non arriva il
+movimento reale corrispondente sull'estratto conto: a quel punto puoi
+collegarla manualmente (`match_projection`, non ancora esposto via bot) così
+smette di contare due volte, oppure lasciarla — il suo effetto sul saldo
+attuale (`/saldo`) è comunque zero, conta solo per `/proiezione` e per
+"previsione saldo al ...".
+
+Per chiedere una proiezione a una data specifica, che combina saldo attuale +
+tutte le previsioni inserite + una stima automatica delle **Utenze** (bollette
+luce/gas/telefono) basata sulla media mensile degli ultimi 6 mesi:
+
+```
+previsione saldo al 2026-12-01
+```
+
+Risposta tipo:
+```
+Saldo oggi: 2.780,64 €
+Previsioni inserite: -150,00 €
+Utenze stimate (3 mesi × -68,50 € medi): -205,50 €
+Previsione al 2026-12-01: 2.424,14 €
+```
+
+Il mese di una bolletta Utenze già inserita come previsione esplicita **non**
+viene anche stimato dalla media (altrimenti conterebbe due volte) — solo i
+mesi ancora "scoperti" ricevono la stima automatica. Se hai meno di 3 mesi di
+storico Utenze, il bot te lo segnala esplicitamente ("poco affidabile") invece
+di darti un numero con falsa precisione.
 
 ### Satispay: come viene trattato
 

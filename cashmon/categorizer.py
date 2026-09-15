@@ -24,6 +24,8 @@ CATEGORIES = [
     "Carta di Credito",
     "Satispay",
     "Trasferimento interno",
+    "Viaggi",
+    "Branzi",
     "Altro",
 ]
 
@@ -84,6 +86,10 @@ SEED_RULES = [
     # swept in here by accident.
     ("BASCULAMENTO", "Trasferimento interno", SEED_PRIORITY),
     ("TRASFERIMENTO RESTO", "Trasferimento interno", SEED_PRIORITY),
+    # A place name, not a merchant type -- groups everything spent while
+    # there (bar, pizzeria, market, ...) under one category rather than
+    # splitting it across Alimentari/Svago/etc.
+    ("BRANZI", "Branzi", SEED_PRIORITY),
     ("BONIFICO", "Bonifico", SEED_PRIORITY + 100),  # generic fallback, checked last
 ]
 

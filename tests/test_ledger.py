@@ -3,9 +3,11 @@ import pytest
 from cashmon.ledger import (
     add_projection,
     add_transaction,
+    average_monthly_category_spend,
     balance_at,
     compute_import_hash,
     forecast_at,
+    forecast_breakdown,
     get_account_id,
     get_last_actual_date,
     match_projection,
@@ -121,6 +123,65 @@ def test_total_balance_at_sums_every_account(seeded_conn, account_id):
     assert total_balance_at(seeded_conn, "2026-01-05") == 1_000_000 + 500_000
     assert balance_at(seeded_conn, "2026-01-05", account_id) == 1_000_000 - 2000
     assert balance_at(seeded_conn, "2026-01-05", deposit_id) == 500_000 + 2000
+
+
+def _add_monthly_utenze(conn, account_id, dates_and_amounts):
+    for date, amount in dates_and_amounts:
+        add_transaction(conn, date, amount, "Bolletta", source="findomestic_pdf", account_id=account_id, category="Utenze")
+
+
+def test_average_monthly_category_spend_divides_by_months_with_data_not_lookback(seeded_conn, account_id):
+    # Only 3 months of history exist; dividing by the 6-month lookback window
+    # would understate the average by half.
+    _add_monthly_utenze(seeded_conn, account_id, [("2026-01-15", -6000), ("2026-02-15", -6000), ("2026-03-15", -6000)])
+    avg, months = average_monthly_category_spend(seeded_conn, account_id, "Utenze", "2026-03-15", months_lookback=6)
+    assert months == 3
+    assert avg == -6000
+
+
+def test_average_monthly_category_spend_no_data_returns_zero(seeded_conn, account_id):
+    avg, months = average_monthly_category_spend(seeded_conn, account_id, "Utenze", "2026-03-15")
+    assert (avg, months) == (0, 0)
+
+
+def test_forecast_breakdown_adds_average_for_every_gap_month(seeded_conn, account_id):
+    _add_monthly_utenze(seeded_conn, account_id, [("2026-01-15", -6000), ("2026-02-15", -6000), ("2026-03-15", -6000)])
+    # last actual date is 2026-03-15; target 2026-05-20 spans two full gap
+    # months (April, May) with no explicit Utenze projection in either.
+    result = forecast_breakdown(seeded_conn, "2026-05-20", "2026-05-20", account_id, "Utenze")
+    assert result["category_avg_cents"] == -6000
+    assert result["category_avg_basis_months"] == 3
+    assert result["category_gap_months"] == 2
+    assert result["category_estimate_cents"] == -12000
+    assert result["projections_cents"] == 0
+    assert result["balance_today_cents"] == 1_000_000 - 18000
+    assert result["total_cents"] == 1_000_000 - 18000 - 12000
+
+
+def test_forecast_breakdown_explicit_projection_replaces_estimate_for_its_month(seeded_conn, account_id):
+    _add_monthly_utenze(seeded_conn, account_id, [("2026-01-15", -6000), ("2026-02-15", -6000), ("2026-03-15", -6000)])
+    without_projection = forecast_breakdown(seeded_conn, "2026-05-20", "2026-05-20", account_id, "Utenze")
+
+    # An explicit Utenze bill logged for April: April should now come from
+    # this real number, not the average -- only May (still uncovered) gets
+    # the average added.
+    add_projection(seeded_conn, "2026-04-10", -5000, "Bolletta luce", category="Utenze")
+    with_projection = forecast_breakdown(seeded_conn, "2026-05-20", "2026-05-20", account_id, "Utenze")
+
+    assert with_projection["category_gap_months"] == 1  # only May left uncovered
+    assert with_projection["projections_cents"] == -5000
+    assert with_projection["category_estimate_cents"] == -6000
+    # Total moves by (projection - average), not by the projection alone --
+    # that's the double-count check: April's average contribution (-6000)
+    # got replaced by the real -5000, a net change of +1000.
+    assert with_projection["total_cents"] - without_projection["total_cents"] == -5000 - (-6000)
+
+
+def test_forecast_breakdown_same_month_as_last_actual_has_no_gap(seeded_conn, account_id):
+    _add_monthly_utenze(seeded_conn, account_id, [("2026-03-15", -6000)])
+    result = forecast_breakdown(seeded_conn, "2026-03-20", "2026-03-20", account_id, "Utenze")
+    assert result["category_gap_months"] == 0
+    assert result["category_estimate_cents"] == 0
 
 
 def test_compute_import_hash_is_stable_and_normalizes_description():
