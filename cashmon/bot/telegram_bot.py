@@ -4,6 +4,9 @@ unchanged on a laptop, a Raspberry Pi, or any free-tier always-on host.
 
 Commands:
   /start        welcome + shows your chat id (needed to set OWNER_CHAT_ID)
+  /help         same as /start -- a reminder of what's available
+  Telegram's own "/" command menu also lists all of these with a short
+  description (registered once at startup via set_my_commands).
   /saldo        current real balance
   /proiezione [giorni]   projected balance N days out (default 30)
   /categorizza  works through the backlog of uncategorized transactions
@@ -43,7 +46,7 @@ category it is via inline buttons, and remembers the answer for next time.
 import logging
 from datetime import date, datetime, timedelta
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -371,11 +374,12 @@ def build_application() -> Application:
     conn = db.connect(app_config.DB_PATH)
     db.init_schema(conn)
 
-    application = Application.builder().token(app_config.TELEGRAM_BOT_TOKEN).build()
+    application = Application.builder().token(app_config.TELEGRAM_BOT_TOKEN).post_init(_register_bot_commands).build()
     application.bot_data["conn"] = conn
     application.bot_data["checking_account_id"] = get_account_id(conn, DEFAULT_ACCOUNT_NAME)
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", start))
     application.add_handler(CommandHandler("saldo", saldo))
     application.add_handler(CommandHandler("proiezione", proiezione))
     application.add_handler(CommandHandler("categorizza", categorizza))
@@ -383,6 +387,22 @@ def build_application() -> Application:
     application.add_handler(CallbackQueryHandler(handle_category_answer, pattern=r"^cat:"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     return application
+
+
+async def _register_bot_commands(application: Application) -> None:
+    """Populates Telegram's own "/" command menu (tap the menu button next to
+    the message box) so the available commands are always one tap away,
+    without having to remember or re-read /start."""
+    await application.bot.set_my_commands(
+        [
+            BotCommand("start", "Comandi e formati disponibili"),
+            BotCommand("help", "Uguale a /start"),
+            BotCommand("saldo", "Saldo di ogni conto e patrimonio totale"),
+            BotCommand("proiezione", "Saldo previsto tra N giorni (conto corrente)"),
+            BotCommand("categorizza", "Categorizza le spese in sospeso"),
+            BotCommand("previsioni", "Elenca le previsioni in sospeso"),
+        ]
+    )
 
 
 def main() -> None:

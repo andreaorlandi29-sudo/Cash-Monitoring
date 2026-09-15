@@ -200,13 +200,17 @@ processo persistente (es. un free tier con worker sempre attivo — evita i
 free tier "serverless" che dormono, altrimenti perdi i messaggi nel
 frattempo).
 
-Comandi disponibili:
+Comandi disponibili (compaiono anche nel menu "/" di Telegram vicino al
+campo di testo, con una breve descrizione — utile se te li dimentichi):
 
+- `/start` o `/help` — richiama in ogni momento questo stesso elenco più i
+  formati di testo libero
 - `/saldo` — saldo reale di ogni conto tracciato, più il patrimonio totale se
   ne hai più di uno
 - `/proiezione [giorni]` — saldo previsto tra N giorni (default 30) sul conto
   corrente
 - `/categorizza` — smaltisce le spese senza categoria una alla volta
+- `/previsioni` — elenca le previsioni in sospeso
 
 Testo libero per registrare un movimento:
 
