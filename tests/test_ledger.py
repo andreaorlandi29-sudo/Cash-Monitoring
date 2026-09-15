@@ -6,13 +6,16 @@ from cashmon.ledger import (
     average_monthly_category_spend,
     balance_at,
     compute_import_hash,
+    delete_projection,
     forecast_at,
     forecast_breakdown,
     get_account_id,
     get_last_actual_date,
+    list_projections,
     match_projection,
     supersede_transaction,
     total_balance_at,
+    update_projection,
 )
 
 
@@ -182,6 +185,59 @@ def test_forecast_breakdown_same_month_as_last_actual_has_no_gap(seeded_conn, ac
     result = forecast_breakdown(seeded_conn, "2026-03-20", "2026-03-20", account_id, "Utenze")
     assert result["category_gap_months"] == 0
     assert result["category_estimate_cents"] == 0
+
+
+def test_list_projections_excludes_matched_by_default(seeded_conn, account_id):
+    pending_id = add_projection(seeded_conn, "2026-02-01", -30000, "Affitto previsto")
+    matched_id = add_projection(seeded_conn, "2026-03-01", -5000, "Bolletta")
+    result = add_transaction(seeded_conn, "2026-03-01", -5000, "Bolletta reale", source="findomestic_pdf", account_id=account_id)
+    match_projection(seeded_conn, matched_id, result.transaction_id)
+
+    rows = list_projections(seeded_conn)
+    ids = [r["id"] for r in rows]
+    assert pending_id in ids
+    assert matched_id not in ids
+
+
+def test_delete_projection_removes_an_unmatched_one(seeded_conn):
+    projection_id = add_projection(seeded_conn, "2026-02-01", -30000, "Affitto previsto")
+    assert delete_projection(seeded_conn, projection_id) is True
+    assert list_projections(seeded_conn) == []
+
+
+def test_delete_projection_refuses_unknown_id(seeded_conn):
+    assert delete_projection(seeded_conn, 999) is False
+
+
+def test_delete_projection_refuses_a_matched_projection(seeded_conn, account_id):
+    projection_id = add_projection(seeded_conn, "2026-02-01", -30000, "Affitto previsto")
+    result = add_transaction(seeded_conn, "2026-02-01", -30000, "Affitto reale", source="findomestic_pdf", account_id=account_id)
+    match_projection(seeded_conn, projection_id, result.transaction_id)
+
+    assert delete_projection(seeded_conn, projection_id) is False
+    # still there, untouched
+    row = seeded_conn.execute("SELECT id FROM projections WHERE id = ?", (projection_id,)).fetchone()
+    assert row is not None
+
+
+def test_update_projection_replaces_fields(seeded_conn):
+    projection_id = add_projection(seeded_conn, "2026-02-01", -30000, "Affitto previsto")
+    assert update_projection(seeded_conn, projection_id, "2026-02-15", -32000, "Affitto rivisto", "Casa") is True
+
+    rows = list_projections(seeded_conn)
+    assert len(rows) == 1
+    assert rows[0]["date"] == "2026-02-15"
+    assert rows[0]["amount_cents"] == -32000
+    assert rows[0]["description"] == "Affitto rivisto"
+    assert rows[0]["category"] == "Casa"
+
+
+def test_update_projection_refuses_a_matched_projection(seeded_conn, account_id):
+    projection_id = add_projection(seeded_conn, "2026-02-01", -30000, "Affitto previsto")
+    result = add_transaction(seeded_conn, "2026-02-01", -30000, "Affitto reale", source="findomestic_pdf", account_id=account_id)
+    match_projection(seeded_conn, projection_id, result.transaction_id)
+
+    assert update_projection(seeded_conn, projection_id, "2026-02-15", -32000, "Nuova descrizione") is False
 
 
 def test_compute_import_hash_is_stable_and_normalizes_description():

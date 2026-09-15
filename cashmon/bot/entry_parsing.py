@@ -20,6 +20,11 @@ Formats:
                                         four installments is four messages)
   "previsione saldo al 2026-12-01"  -- asks for a projected balance (see
                                         ledger.forecast_breakdown)
+  "previsione elimina 3"            -- deletes pending projection #3 (see
+                                        /previsioni for the list of ids)
+  "previsione modifica 3 spesa 160 il 2026-10-10 Rata condominio"
+                                     -- replaces projection #3's fields
+                                        entirely (not a partial edit)
 """
 import re
 from dataclasses import dataclass
@@ -29,6 +34,10 @@ from cashmon.bot.formatting import parse_amount_to_cents
 ENTRY_RE = re.compile(r"^(?:(satispay)\s+)?(spesa|entrata)\s+([\d.,]+)\s+(.+)$", re.IGNORECASE)
 PROJECTION_RE = re.compile(r"^previsione\s+(spesa|entrata)\s+([\d.,]+)\s+il\s+(\d{4}-\d{2}-\d{2})\s+(.+)$", re.IGNORECASE)
 BALANCE_FORECAST_RE = re.compile(r"^previsione\s+saldo\s+al\s+(\d{4}-\d{2}-\d{2})$", re.IGNORECASE)
+PROJECTION_DELETE_RE = re.compile(r"^previsione\s+elimina\s+(\d+)$", re.IGNORECASE)
+PROJECTION_MODIFY_RE = re.compile(
+    r"^previsione\s+modifica\s+(\d+)\s+(spesa|entrata)\s+([\d.,]+)\s+il\s+(\d{4}-\d{2}-\d{2})\s+(.+)$", re.IGNORECASE
+)
 
 
 @dataclass
@@ -86,3 +95,33 @@ def parse_balance_forecast_request(text: str):
     request, or None if `text` doesn't match."""
     match = BALANCE_FORECAST_RE.match(text.strip())
     return match.group(1) if match else None
+
+
+def parse_projection_delete(text: str):
+    """Returns the projection id to delete, or None if `text` doesn't match."""
+    match = PROJECTION_DELETE_RE.match(text.strip())
+    return int(match.group(1)) if match else None
+
+
+@dataclass
+class ParsedProjectionEdit:
+    projection_id: int
+    date: str
+    amount_cents: int
+    description: str
+
+
+def parse_projection_modify(text: str):
+    """Returns a ParsedProjectionEdit (a full replacement of the projection's
+    fields, not a partial edit), or None if `text` doesn't match."""
+    match = PROJECTION_MODIFY_RE.match(text.strip())
+    if not match:
+        return None
+
+    id_raw, kind, amount_raw, date_str, description = match.groups()
+    try:
+        cents = parse_amount_to_cents(amount_raw)
+    except ValueError:
+        return None
+    cents = -abs(cents) if kind.lower() == "spesa" else abs(cents)
+    return ParsedProjectionEdit(projection_id=int(id_raw), date=date_str, amount_cents=cents, description=description)

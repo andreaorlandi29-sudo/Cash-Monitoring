@@ -265,6 +265,26 @@ mesi ancora "scoperti" ricevono la stima automatica. Se hai meno di 3 mesi di
 storico Utenze, il bot te lo segnala esplicitamente ("poco affidabile") invece
 di darti un numero con falsa precisione.
 
+**Vedere, modificare o eliminare le previsioni inserite:**
+
+```
+/previsioni
+```
+
+elenca tutte le previsioni ancora in sospeso con un numero (`#3`, ecc.). Con
+quel numero:
+
+```
+previsione modifica 3 spesa 160 il 2026-10-10 Rata condominio
+previsione elimina 3
+```
+
+`modifica` sostituisce **tutti** i campi della previsione (non è una modifica
+parziale: riscrivi importo, data e descrizione anche se cambi solo uno dei
+tre). Una previsione già "realizzata" (collegata a un movimento reale importato
+— vedi sopra) non compare più in `/previsioni` e non può più essere modificata
+o eliminata: è storico, non più un piano.
+
 ### Satispay: come viene trattato
 
 Satispay non è un conto prepagato che "ricarichi": ogni settimana netta

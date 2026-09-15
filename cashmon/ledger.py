@@ -184,6 +184,61 @@ def add_projection(
     return cur.lastrowid
 
 
+def list_projections(conn: sqlite3.Connection, only_unmatched: bool = True):
+    """Pending projections, oldest first. Matched ones (already reconciled
+    against a real transaction) are excluded by default -- they're
+    historical record, not a plan still waiting to happen."""
+    if only_unmatched:
+        return conn.execute(
+            """
+            SELECT id, date, amount_cents, description, category
+            FROM projections WHERE matched_transaction_id IS NULL ORDER BY date ASC
+            """
+        ).fetchall()
+    return conn.execute(
+        "SELECT id, date, amount_cents, description, category, matched_transaction_id FROM projections ORDER BY date ASC"
+    ).fetchall()
+
+
+def get_projection(conn: sqlite3.Connection, projection_id: int):
+    return conn.execute("SELECT * FROM projections WHERE id = ?", (projection_id,)).fetchone()
+
+
+def delete_projection(conn: sqlite3.Connection, projection_id: int) -> bool:
+    """Deletes an unmatched projection. Returns False (no-op) if it doesn't
+    exist or has already been matched to a real transaction -- a matched
+    projection is reconciliation history, not a pending plan, and isn't
+    something a "delete" request should be able to remove."""
+    row = get_projection(conn, projection_id)
+    if row is None or row["matched_transaction_id"] is not None:
+        return False
+    conn.execute("DELETE FROM projections WHERE id = ?", (projection_id,))
+    conn.commit()
+    return True
+
+
+def update_projection(
+    conn: sqlite3.Connection,
+    projection_id: int,
+    date: str,
+    amount_cents: int,
+    description: str,
+    category: Optional[str] = None,
+) -> bool:
+    """Replaces an unmatched projection's fields in place. Returns False
+    (no-op), same reasoning as delete_projection, if it doesn't exist or is
+    already matched."""
+    row = get_projection(conn, projection_id)
+    if row is None or row["matched_transaction_id"] is not None:
+        return False
+    conn.execute(
+        "UPDATE projections SET date = ?, amount_cents = ?, description = ?, category = ? WHERE id = ?",
+        (date, amount_cents, description, category, projection_id),
+    )
+    conn.commit()
+    return True
+
+
 def match_projection(conn: sqlite3.Connection, projection_id: int, transaction_id: int) -> None:
     """Link a projection to the actual transaction that realized it. The
     projection row is kept (not deleted) so forecast-vs-actual stays comparable;

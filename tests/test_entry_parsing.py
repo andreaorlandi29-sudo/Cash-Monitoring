@@ -1,4 +1,10 @@
-from cashmon.bot.entry_parsing import parse_balance_forecast_request, parse_entry, parse_projection
+from cashmon.bot.entry_parsing import (
+    parse_balance_forecast_request,
+    parse_entry,
+    parse_projection,
+    parse_projection_delete,
+    parse_projection_modify,
+)
 
 
 def test_plain_spesa():
@@ -103,3 +109,37 @@ def test_balance_forecast_request_not_matched_by_projection_parser():
 
 def test_unrelated_text_does_not_match_balance_forecast():
     assert parse_balance_forecast_request("previsione spesa 150 il 2026-10-05 Rata condominio") is None
+
+
+def test_projection_delete():
+    assert parse_projection_delete("previsione elimina 3") == 3
+
+
+def test_projection_delete_not_matched_by_other_parsers():
+    assert parse_projection("previsione elimina 3") is None
+    assert parse_balance_forecast_request("previsione elimina 3") is None
+
+
+def test_projection_delete_requires_a_plain_integer_id():
+    assert parse_projection_delete("previsione elimina tre") is None
+
+
+def test_projection_modify():
+    edit = parse_projection_modify("previsione modifica 3 spesa 160 il 2026-10-10 Rata condominio")
+    assert edit.projection_id == 3
+    assert edit.amount_cents == -16000
+    assert edit.date == "2026-10-10"
+    assert edit.description == "Rata condominio"
+
+
+def test_projection_modify_entrata_is_positive():
+    edit = parse_projection_modify("previsione modifica 7 entrata 1300 il 2026-11-27 Tredicesima rivista")
+    assert edit.projection_id == 7
+    assert edit.amount_cents == 130000
+
+
+def test_projection_modify_not_matched_by_other_parsers():
+    text = "previsione modifica 3 spesa 160 il 2026-10-10 Rata condominio"
+    assert parse_projection(text) is None
+    assert parse_projection_delete(text) is None
+    assert parse_balance_forecast_request(text) is None

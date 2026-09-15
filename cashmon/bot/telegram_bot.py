@@ -9,6 +9,8 @@ Commands:
   /categorizza  works through the backlog of uncategorized transactions
                 (e.g. after a statement import), one at a time, chaining to
                 the next automatically after each answer
+  /previsioni   lists pending (unmatched) future projections with their id,
+                needed to delete or modify one
 
 Free text:
   "spesa 12,50 Esselunga"        logs an expense
@@ -29,6 +31,11 @@ Free text:
                                   monthly average) for any month in between
                                   that has no explicit Utenze projection --
                                   see ledger.forecast_breakdown
+  "previsione elimina 3"         deletes pending projection #3 (see
+                                  /previsioni for ids)
+  "previsione modifica 3 spesa 160 il 2026-10-10 Rata condominio"
+                                  replaces projection #3's fields entirely
+                                  (not a partial edit)
 
 If the description doesn't match any categorization rule, the bot asks which
 category it is via inline buttons, and remembers the answer for next time.
@@ -48,18 +55,27 @@ from telegram.ext import (
 
 from cashmon import config as app_config
 from cashmon import db
-from cashmon.bot.entry_parsing import parse_balance_forecast_request, parse_entry, parse_projection
+from cashmon.bot.entry_parsing import (
+    parse_balance_forecast_request,
+    parse_entry,
+    parse_projection,
+    parse_projection_delete,
+    parse_projection_modify,
+)
 from cashmon.bot.formatting import format_eur
 from cashmon.categorizer import CATEGORIES, categorize, learn_rule
 from cashmon.ledger import (
     add_projection,
     add_transaction,
     balance_at,
+    delete_projection,
     forecast_at,
     forecast_breakdown,
     get_account_id,
     list_accounts,
+    list_projections,
     total_balance_at,
+    update_projection,
 )
 from cashmon.seed import DEFAULT_ACCOUNT_NAME
 
@@ -94,7 +110,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Comandi:\n"
         "/saldo - saldo attuale\n"
         "/proiezione [giorni] - saldo previsto\n"
-        "/categorizza - smaltisci le spese senza categoria una alla volta\n\n"
+        "/categorizza - smaltisci le spese senza categoria una alla volta\n"
+        "/previsioni - elenca le previsioni in sospeso (con i numeri per modificarle/eliminarle)\n\n"
         "Per registrare un movimento scrivi ad es.:\n"
         "spesa 12,50 Esselunga\n"
         "entrata 1200 Stipendio\n"
@@ -102,7 +119,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "satispay entrata 20 da Mario\n\n"
         "Per una previsione futura:\n"
         "previsione spesa 150 il 2026-10-05 Rata condominio\n"
-        "previsione saldo al 2026-12-01"
+        "previsione saldo al 2026-12-01\n"
+        "previsione elimina 3\n"
+        "previsione modifica 3 spesa 160 il 2026-10-10 Rata condominio"
     )
 
 
@@ -191,6 +210,24 @@ async def categorizza(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await send_next_uncategorized(update, context)
 
 
+@owner_only
+async def previsioni(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    conn = context.bot_data["conn"]
+    rows = list_projections(conn)
+    if not rows:
+        await update.effective_message.reply_text("Nessuna previsione in sospeso.")
+        return
+
+    lines = ["Previsioni in sospeso:"]
+    for row in rows:
+        category_suffix = f" [{row['category']}]" if row["category"] else ""
+        lines.append(f"#{row['id']} - {row['date']}: {format_eur(row['amount_cents'])} - {row['description']}{category_suffix}")
+    lines.append("")
+    lines.append("Per modificarne una: previsione modifica <numero> spesa|entrata <importo> il <data> <descrizione>")
+    lines.append("Per eliminarne una: previsione elimina <numero>")
+    await update.effective_message.reply_text("\n".join(lines))
+
+
 async def send_balance_forecast(update: Update, context: ContextTypes.DEFAULT_TYPE, target_date: str) -> None:
     try:
         datetime.strptime(target_date, "%Y-%m-%d")
@@ -229,6 +266,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await send_balance_forecast(update, context, forecast_target)
         return
 
+    delete_id = parse_projection_delete(text)
+    if delete_id is not None:
+        if delete_projection(conn, delete_id):
+            await update.effective_message.reply_text(f"Previsione #{delete_id} eliminata.")
+        else:
+            await update.effective_message.reply_text(f"Previsione #{delete_id} non trovata (o già realizzata).")
+        return
+
+    edit = parse_projection_modify(text)
+    if edit:
+        category = categorize(conn, edit.description)
+        if update_projection(conn, edit.projection_id, edit.date, edit.amount_cents, edit.description, category):
+            suffix = f" [{category}]" if category else ""
+            await update.effective_message.reply_text(
+                f"Previsione #{edit.projection_id} aggiornata: {format_eur(edit.amount_cents)} il {edit.date} - "
+                f"{edit.description}{suffix}"
+            )
+        else:
+            await update.effective_message.reply_text(f"Previsione #{edit.projection_id} non trovata (o già realizzata).")
+        return
+
     projection = parse_projection(text)
     if projection:
         category = categorize(conn, projection.description)
@@ -245,7 +303,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.effective_message.reply_text(
             'Non ho capito. Usa il formato: "spesa 12,50 Esselunga", "entrata 1200 Stipendio", '
             '"satispay spesa 12,50 Bar" / "satispay entrata 20 da Mario", '
-            '"previsione spesa 150 il 2026-10-05 Rata condominio" oppure "previsione saldo al 2026-12-01".'
+            '"previsione spesa 150 il 2026-10-05 Rata condominio", "previsione saldo al 2026-12-01", '
+            '"previsione elimina <numero>" oppure "previsione modifica <numero> spesa|entrata <importo> il <data> <descrizione>". '
+            "Usa /previsioni per vedere i numeri."
         )
         return
 
@@ -319,6 +379,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("saldo", saldo))
     application.add_handler(CommandHandler("proiezione", proiezione))
     application.add_handler(CommandHandler("categorizza", categorizza))
+    application.add_handler(CommandHandler("previsioni", previsioni))
     application.add_handler(CallbackQueryHandler(handle_category_answer, pattern=r"^cat:"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     return application
