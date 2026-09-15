@@ -6,6 +6,9 @@ Commands:
   /start        welcome + shows your chat id (needed to set OWNER_CHAT_ID)
   /saldo        current real balance
   /proiezione [giorni]   projected balance N days out (default 30)
+  /categorizza  works through the backlog of uncategorized transactions
+                (e.g. after a statement import), one at a time, chaining to
+                the next automatically after each answer
 
 Free text:
   "spesa 12,50 Esselunga"        logs an expense
@@ -68,7 +71,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"{update.effective_chat.id}\n\n"
         "Comandi:\n"
         "/saldo - saldo attuale\n"
-        "/proiezione [giorni] - saldo previsto\n\n"
+        "/proiezione [giorni] - saldo previsto\n"
+        "/categorizza - smaltisci le spese senza categoria una alla volta\n\n"
         "Per registrare un movimento scrivi ad es.:\n"
         "spesa 12,50 Esselunga\n"
         "entrata 1200 Stipendio\n"
@@ -102,20 +106,60 @@ async def proiezione(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
-async def ask_category(update: Update, context: ContextTypes.DEFAULT_TYPE, transaction_id: int, description: str) -> None:
+async def ask_category(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    transaction_id: int,
+    description: str,
+    amount_cents: int = None,
+    date_str: str = None,
+    bulk: bool = False,
+) -> None:
     conn = context.bot_data["conn"]
+    prefix = f"{format_eur(amount_cents)} del {date_str} — " if amount_cents is not None else ""
+    bulk_flag = "1" if bulk else "0"
     keyboard = [
-        [InlineKeyboardButton(cat, callback_data=f"cat:{transaction_id}:{cat}")]
+        [InlineKeyboardButton(cat, callback_data=f"cat:{transaction_id}:{cat}:{bulk_flag}")]
         for cat in CATEGORIES
     ]
     message = await update.effective_message.reply_text(
-        f'Che categoria ha "{description}"?', reply_markup=InlineKeyboardMarkup(keyboard)
+        f'{prefix}che categoria ha "{description}"?', reply_markup=InlineKeyboardMarkup(keyboard)
     )
     conn.execute(
         "INSERT INTO pending_questions (transaction_id, chat_id, message_id) VALUES (?, ?, ?)",
         (transaction_id, update.effective_chat.id, message.message_id),
     )
     conn.commit()
+
+
+async def send_next_uncategorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Used by /categorizza and, after each bulk answer, to chain to the next
+    uncategorized transaction until the backlog (e.g. from a statement
+    import) is empty."""
+    conn = context.bot_data["conn"]
+    row = conn.execute(
+        """
+        SELECT id, date, amount_cents, description FROM transactions
+        WHERE category IS NULL AND superseded_by_id IS NULL
+        ORDER BY date ASC LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        await update.effective_message.reply_text("Fatto! Nessuna spesa in sospeso da categorizzare.")
+        return
+
+    remaining = conn.execute(
+        "SELECT COUNT(*) AS n FROM transactions WHERE category IS NULL AND superseded_by_id IS NULL"
+    ).fetchone()["n"]
+    await update.effective_message.reply_text(f"Ne restano {remaining} da categorizzare.")
+    await ask_category(
+        update, context, row["id"], row["description"], amount_cents=row["amount_cents"], date_str=row["date"], bulk=True
+    )
+
+
+@owner_only
+async def categorizza(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await send_next_uncategorized(update, context)
 
 
 @owner_only
@@ -150,7 +194,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
     else:
         await update.effective_message.reply_text(f"Registrato: {format_eur(entry.amount_cents)} - {entry.description}{suffix}")
-        await ask_category(update, context, result.transaction_id, entry.description)
+        await ask_category(
+            update, context, result.transaction_id, entry.description,
+            amount_cents=entry.amount_cents, date_str=date.today().isoformat(),
+        )
 
 
 @owner_only
@@ -158,8 +205,9 @@ async def handle_category_answer(update: Update, context: ContextTypes.DEFAULT_T
     conn = context.bot_data["conn"]
     query = update.callback_query
     await query.answer()
-    _, transaction_id_raw, category = query.data.split(":", 2)
+    _, transaction_id_raw, category, bulk_raw = query.data.split(":", 3)
     transaction_id = int(transaction_id_raw)
+    bulk = bulk_raw == "1"
 
     row = conn.execute("SELECT description FROM transactions WHERE id = ?", (transaction_id,)).fetchone()
     if row is None:
@@ -176,6 +224,9 @@ async def handle_category_answer(update: Update, context: ContextTypes.DEFAULT_T
 
     await query.edit_message_text(f'"{row["description"]}" categorizzato come {category}.')
 
+    if bulk:
+        await send_next_uncategorized(update, context)
+
 
 def build_application() -> Application:
     if not app_config.TELEGRAM_BOT_TOKEN:
@@ -190,6 +241,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("saldo", saldo))
     application.add_handler(CommandHandler("proiezione", proiezione))
+    application.add_handler(CommandHandler("categorizza", categorizza))
     application.add_handler(CallbackQueryHandler(handle_category_answer, pattern=r"^cat:"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     return application
