@@ -44,8 +44,12 @@ INTENT_TOOL = {
                 ),
             },
             "motivo_non_chiaro": {
-                "type": "string",
-                "description": "se riconosciuto=false: breve spiegazione in italiano di cosa manca (es. 'importo non specificato', 'non chiaro se spesa o entrata').",
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "description": (
+                    "Se riconosciuto=false: breve spiegazione in italiano di cosa manca "
+                    "(es. 'importo non specificato', 'non chiaro se spesa o entrata'). "
+                    "null se riconosciuto=true."
+                ),
             },
             "tipo": {
                 "type": "string",
@@ -59,36 +63,55 @@ INTENT_TOOL = {
             },
             "e_satispay": {
                 "type": "boolean",
-                "description": "true solo se il messaggio menziona esplicitamente Satispay.",
+                "description": (
+                    "true solo se il messaggio menziona esplicitamente Satispay, false altrimenti. "
+                    "Campo obbligatorio: valuta sempre esplicitamente se Satispay è menzionato o no."
+                ),
             },
             "segno": {
-                "type": "string",
-                "enum": ["spesa", "entrata"],
-                "description": "solo per tipo=movimento o tipo=previsione.",
+                "anyOf": [{"type": "string", "enum": ["spesa", "entrata"]}, {"type": "null"}],
+                "description": (
+                    "obbligatorio (non null) per tipo=movimento o tipo=previsione: indica se è una "
+                    "spesa o un'entrata. null per tipo=richiesta_saldo o tipo=non_pertinente."
+                ),
             },
             "importo_euro": {
-                "type": "number",
-                "description": "importo assoluto in euro (sempre positivo), solo per tipo=movimento o tipo=previsione.",
+                "anyOf": [{"type": "number"}, {"type": "null"}],
+                "description": (
+                    "obbligatorio (non null) per tipo=movimento o tipo=previsione: importo assoluto "
+                    "in euro (sempre positivo) menzionato nel messaggio. Estrailo sempre quando è "
+                    "presente nel testo, anche se il messaggio è discorsivo. null per "
+                    "tipo=richiesta_saldo o tipo=non_pertinente."
+                ),
             },
             "data": {
-                "type": "string",
+                "anyOf": [{"type": "string"}, {"type": "null"}],
                 "description": (
                     "data in formato YYYY-MM-DD. Risolvi le espressioni relative (oggi, domani, "
                     "lunedì prossimo, fra 3 mesi, ecc.) usando la data odierna indicata nel prompt. "
-                    "Per tipo=movimento senza data esplicita, usa la data odierna. Obbligatoria per "
-                    "tipo=previsione e tipo=richiesta_saldo."
+                    "Per tipo=movimento senza data esplicita, usa la data odierna. Obbligatoria (non "
+                    "null) per tipo=previsione e tipo=richiesta_saldo. null per tipo=non_pertinente."
                 ),
             },
             "descrizione": {
-                "type": "string",
+                "anyOf": [{"type": "string"}, {"type": "null"}],
                 "description": (
                     "breve descrizione/esercente ripulita dal linguaggio discorsivo, es. da "
                     "'ho speso 12 euro da esselunga stamattina' estrai 'Esselunga'. "
-                    "Solo per tipo=movimento o tipo=previsione."
+                    "Obbligatoria (non null) per tipo=movimento o tipo=previsione. null altrimenti."
                 ),
             },
         },
-        "required": ["riconosciuto", "tipo"],
+        "required": [
+            "riconosciuto",
+            "motivo_non_chiaro",
+            "tipo",
+            "e_satispay",
+            "segno",
+            "importo_euro",
+            "data",
+            "descrizione",
+        ],
         "additionalProperties": False,
     },
     "strict": True,
