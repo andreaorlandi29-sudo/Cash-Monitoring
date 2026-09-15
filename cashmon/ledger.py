@@ -155,6 +155,30 @@ def add_transaction(
         return InsertResult(transaction_id=row["id"] if row else None, inserted=False)
 
 
+def delete_transaction(conn: sqlite3.Connection, transaction_id: int) -> bool:
+    """Deletes a manually-entered transaction (source 'telegram' or
+    'satispay') -- the escape hatch for a typo/duplicate caught during
+    statement reconciliation. Refuses (returns False, no-op) for anything
+    that isn't a plain manual entry: an authoritative import (statement/CSV/
+    Nexi) is bank-of-record and must not be editable from chat, and a row
+    still referenced by a projection's matched_transaction_id is
+    reconciliation history a delete would silently corrupt. Any
+    pending_questions rows for it are cleaned up too -- they're pure
+    message-routing scratch data with no value once the transaction is gone."""
+    row = conn.execute("SELECT source FROM transactions WHERE id = ?", (transaction_id,)).fetchone()
+    if row is None or row["source"] not in ("telegram", "satispay"):
+        return False
+    referenced = conn.execute(
+        "SELECT 1 FROM projections WHERE matched_transaction_id = ?", (transaction_id,)
+    ).fetchone()
+    if referenced is not None:
+        return False
+    conn.execute("DELETE FROM pending_questions WHERE transaction_id = ?", (transaction_id,))
+    conn.execute("DELETE FROM transactions WHERE id = ?", (transaction_id,))
+    conn.commit()
+    return True
+
+
 def supersede_transaction(conn: sqlite3.Connection, provisional_id: int, authoritative_id: int) -> None:
     """Mark a provisional transaction (e.g. a Telegram notification) as replaced
     by an authoritative one (e.g. the matching statement row), without deleting

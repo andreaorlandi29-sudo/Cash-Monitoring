@@ -180,6 +180,23 @@ che non tornano: confronta sempre il riepilogo stampato a fine comando con i
 totali "Entrate complessive / Uscite complessive" (Findomestic) o "TOTALE
 SPESE" (Nexi) stampati sull'estratto conto stesso.
 
+### Riconciliazione con l'estratto conto (via Telegram)
+
+Invece della riga di comando, puoi mandare il PDF dell'estratto conto
+direttamente al bot come documento Telegram: lo riconosce da solo
+(Findomestic o Nexi) e lo importa.
+
+Per un estratto Findomestic (conto corrente o deposito), il bot fa anche la
+**quadratura**: ogni movimento inserito a mano via chat che trova una
+corrispondenza sull'estratto (stesso importo, data entro 5 giorni) viene
+collegato alla riga ufficiale, così non conta due volte; il saldo calcolato
+viene poi confrontato con il "SALDO FINALE" stampato sull'estratto stesso, e
+ogni movimento inserito a mano rimasto senza riscontro ti viene segnalato.
+Per correggere un movimento sbagliato o duplicato: `movimento elimina
+<numero>` (funziona solo sui movimenti inseriti a mano, mai su una riga
+importata da un estratto). Puoi anche controllare la situazione in qualsiasi
+momento, senza caricare un nuovo estratto, con `/riconcilia`.
+
 ## Bot Telegram
 
 1. Crea un bot con [@BotFather](https://t.me/BotFather) su Telegram, copia il

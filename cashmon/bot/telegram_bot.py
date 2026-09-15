@@ -14,6 +14,17 @@ Commands:
                 the next automatically after each answer
   /previsioni   lists pending (unmatched) future projections with their id,
                 needed to delete or modify one
+  /riconcilia   lists manually-entered movements still unconfirmed by any
+                bank statement (see the PDF upload below)
+
+Bank statement PDFs: send a Findomestic (checking or deposit) or Nexi
+statement as a Telegram document to import it. A Findomestic import also
+reconciles against manually-entered movements on that account (see
+cashmon.reconcile): a manual entry gets linked to the matching statement row
+so the same money isn't counted twice, and the statement's own printed
+closing balance is checked against what cashmon computes. Movements still
+unmatched afterwards are reported back, with "movimento elimina <numero>" to
+remove a manual one that was a typo or duplicate.
 
 Free text:
   "spesa 12,50 Esselunga"        logs an expense
@@ -50,6 +61,7 @@ If the description doesn't match any categorization rule, the bot asks which
 category it is via inline buttons, and remembers the answer for next time.
 """
 import logging
+import tempfile
 from datetime import date, datetime, timedelta
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -64,6 +76,7 @@ from telegram.ext import (
 
 from cashmon import config as app_config
 from cashmon import db
+from cashmon import reconcile as reconcile_module
 from cashmon.bot import nlu
 from cashmon.bot.entry_parsing import (
     parse_balance_forecast_request,
@@ -71,14 +84,18 @@ from cashmon.bot.entry_parsing import (
     parse_projection,
     parse_projection_delete,
     parse_projection_modify,
+    parse_transaction_delete,
 )
 from cashmon.bot.formatting import format_eur
 from cashmon.categorizer import CATEGORIES, categorize, learn_rule
+from cashmon.importers import pdf_findomestic, pdf_nexi
+from cashmon.importers.detect import detect_pdf_kind
 from cashmon.ledger import (
     add_projection,
     add_transaction,
     balance_at,
     delete_projection,
+    delete_transaction,
     forecast_at,
     forecast_breakdown,
     get_account_id,
@@ -88,6 +105,8 @@ from cashmon.ledger import (
     update_projection,
 )
 from cashmon.seed import DEFAULT_ACCOUNT_NAME
+
+MAX_UNMATCHED_IN_REPLY = 15
 
 BALANCE_FORECAST_CATEGORY = "Utenze"
 
@@ -121,7 +140,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/saldo - saldo attuale\n"
         "/proiezione [giorni] - saldo previsto\n"
         "/categorizza - smaltisci le spese senza categoria una alla volta\n"
-        "/previsioni - elenca le previsioni in sospeso (con i numeri per modificarle/eliminarle)\n\n"
+        "/previsioni - elenca le previsioni in sospeso (con i numeri per modificarle/eliminarle)\n"
+        "/riconcilia - controlla i movimenti inseriti a mano senza riscontro sull'estratto conto\n\n"
         "Per registrare un movimento scrivi ad es.:\n"
         "spesa 12,50 Esselunga\n"
         "entrata 1200 Stipendio\n"
@@ -131,7 +151,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "previsione spesa 150 il 2026-10-05 Rata condominio\n"
         "previsione saldo al 2026-12-01\n"
         "previsione elimina 3\n"
-        "previsione modifica 3 spesa 160 il 2026-10-10 Rata condominio"
+        "previsione modifica 3 spesa 160 il 2026-10-10 Rata condominio\n\n"
+        "Manda un PDF dell'estratto conto (Findomestic o Nexi) per importarlo e "
+        "verificare i movimenti inseriti a mano. Per correggerne uno sbagliato:\n"
+        "movimento elimina 7"
     )
 
 
@@ -238,6 +261,98 @@ async def previsioni(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.effective_message.reply_text("\n".join(lines))
 
 
+def _format_unmatched_pending(rows) -> list:
+    if not rows:
+        return ["Nessun movimento inserito a mano è rimasto senza riscontro."]
+    lines = [f"Movimenti inseriti a mano senza riscontro sull'estratto conto ({len(rows)}):"]
+    for row in rows[:MAX_UNMATCHED_IN_REPLY]:
+        lines.append(f"#{row['id']} - {row['date']}: {format_eur(row['amount_cents'])} - {row['description']}")
+    if len(rows) > MAX_UNMATCHED_IN_REPLY:
+        lines.append(f"... e altri {len(rows) - MAX_UNMATCHED_IN_REPLY}.")
+    lines.append("Per eliminarne uno sbagliato/duplicato: movimento elimina <numero>")
+    return lines
+
+
+def format_reconcile_summary(result: reconcile_module.ReconcileResult) -> str:
+    lines = [
+        f"Conto: {result.account_name}",
+        f"Importate {result.inserted} righe nuove dall'estratto conto, {result.duplicates} duplicati ignorati.",
+    ]
+    if result.matched:
+        lines.append(f"{result.matched} movimenti inseriti a mano sono stati confermati dall'estratto conto.")
+
+    if result.closing_balance_cents is not None:
+        if result.computed_balance_cents == result.closing_balance_cents:
+            lines.append(f"Saldo verificato: {format_eur(result.closing_balance_cents)}, combacia con l'estratto conto.")
+        else:
+            delta = result.computed_balance_cents - result.closing_balance_cents
+            lines.append(
+                f"ATTENZIONE: saldo calcolato {format_eur(result.computed_balance_cents)}, "
+                f"saldo sull'estratto conto {format_eur(result.closing_balance_cents)} "
+                f"(differenza {format_eur(delta)})."
+            )
+    else:
+        lines.append("Non sono riuscito a leggere il saldo finale sull'estratto conto per verificarlo.")
+
+    lines.extend(_format_unmatched_pending(result.unmatched_pending))
+    return "\n".join(lines)
+
+
+@owner_only
+async def riconcilia(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    conn = context.bot_data["conn"]
+    account_id = context.bot_data["checking_account_id"]
+    rows = reconcile_module.list_unmatched_pending(conn, account_id, date.today().isoformat())
+    await update.effective_message.reply_text("\n".join(_format_unmatched_pending(rows)))
+
+
+@owner_only
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    document = update.effective_message.document
+    file_name = (document.file_name or "").lower()
+    if document.mime_type != "application/pdf" and not file_name.endswith(".pdf"):
+        await update.effective_message.reply_text("Per ora capisco solo estratti conto in PDF (Findomestic o Nexi).")
+        return
+
+    conn = context.bot_data["conn"]
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as tmp:
+        telegram_file = await document.get_file()
+        await telegram_file.download_to_drive(tmp.name)
+
+        kind = detect_pdf_kind(tmp.name)
+        if kind == "findomestic":
+            account_name, transactions, closing_balance_cents = pdf_findomestic.parse_pdf(tmp.name)
+            if not transactions:
+                await update.effective_message.reply_text(
+                    f"Non sono riuscito a leggere nessun movimento da questo PDF (conto rilevato: {account_name}). "
+                    "Il formato potrebbe essere cambiato: non ho importato nulla."
+                )
+                return
+            account_id = get_account_id(conn, account_name)
+            result = reconcile_module.reconcile_statement(
+                conn, account_id, account_name, "findomestic_pdf", transactions, closing_balance_cents
+            )
+            await update.effective_message.reply_text(format_reconcile_summary(result))
+        elif kind == "nexi":
+            transactions = pdf_nexi.parse_pdf(tmp.name)
+            if not transactions:
+                await update.effective_message.reply_text(
+                    "Non sono riuscito a leggere nessun movimento da questo PDF Nexi. Non ho importato nulla."
+                )
+                return
+            summary = pdf_nexi.import_pdf(conn, tmp.name)
+            await update.effective_message.reply_text(
+                f"Importate {summary['inserted']} spese carta Nexi "
+                f"({summary['categorized']} categorizzate, {summary['needs_category']} da categorizzare), "
+                f"{summary['duplicates']} duplicati ignorati. Non influenzano il saldo (verranno addebitate in blocco "
+                "quando importi l'estratto conto Findomestic del mese dell'addebito)."
+            )
+        else:
+            await update.effective_message.reply_text(
+                "Non riconosco questo PDF: non sembra un estratto conto Findomestic né Nexi."
+            )
+
+
 async def send_balance_forecast(update: Update, context: ContextTypes.DEFAULT_TYPE, target_date: str) -> None:
     try:
         datetime.strptime(target_date, "%Y-%m-%d")
@@ -305,8 +420,9 @@ RIGID_FORMAT_HELP = (
     'Non ho capito. Usa il formato: "spesa 12,50 Esselunga", "entrata 1200 Stipendio", '
     '"satispay spesa 12,50 Bar" / "satispay entrata 20 da Mario", '
     '"previsione spesa 150 il 2026-10-05 Rata condominio", "previsione saldo al 2026-12-01", '
-    '"previsione elimina <numero>" oppure "previsione modifica <numero> spesa|entrata <importo> il <data> <descrizione>". '
-    "Usa /previsioni per vedere i numeri. Puoi anche scrivere più liberamente, es. "
+    '"previsione elimina <numero>" oppure "previsione modifica <numero> spesa|entrata <importo> il <data> <descrizione>", '
+    'oppure "movimento elimina <numero>" per correggere un movimento inserito a mano. '
+    "Usa /previsioni o /riconcilia per vedere i numeri. Puoi anche scrivere più liberamente, es. "
     '"ho speso 12 euro da Esselunga" o "quanto avrò a dicembre?".'
 )
 
@@ -408,6 +524,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await record_transaction(update, context, entry.description, entry.amount_cents, entry.source, entry.counts_toward_balance)
         return
 
+    transaction_delete_id = parse_transaction_delete(text)
+    if transaction_delete_id is not None:
+        if delete_transaction(conn, transaction_delete_id):
+            await update.effective_message.reply_text(f"Movimento #{transaction_delete_id} eliminato.")
+        else:
+            await update.effective_message.reply_text(
+                f"Movimento #{transaction_delete_id} non trovato, oppure non eliminabile "
+                "(solo i movimenti inseriti a mano si possono eliminare)."
+            )
+        return
+
     if await try_conversational_fallback(update, context, text):
         return
 
@@ -459,7 +586,9 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("proiezione", proiezione))
     application.add_handler(CommandHandler("categorizza", categorizza))
     application.add_handler(CommandHandler("previsioni", previsioni))
+    application.add_handler(CommandHandler("riconcilia", riconcilia))
     application.add_handler(CallbackQueryHandler(handle_category_answer, pattern=r"^cat:"))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     return application
 
@@ -476,6 +605,7 @@ async def _register_bot_commands(application: Application) -> None:
             BotCommand("proiezione", "Saldo previsto tra N giorni (conto corrente)"),
             BotCommand("categorizza", "Categorizza le spese in sospeso"),
             BotCommand("previsioni", "Elenca le previsioni in sospeso"),
+            BotCommand("riconcilia", "Controlla i movimenti inseriti a mano senza riscontro sull'estratto conto"),
         ]
     )
 

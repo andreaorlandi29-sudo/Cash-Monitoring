@@ -33,6 +33,7 @@ from cashmon.importers.pdf_common import (
     clean_description,
     cut_before_marker,
     extract_lines,
+    find_marker_amount_cents,
     group_transaction_rows,
     parse_italian_amount_to_cents,
 )
@@ -98,10 +99,15 @@ def _build_anchor(line: dict, layout: dict) -> dict:
 
 
 def parse_pdf(pdf_path: str):
-    """Returns (account_name, transactions) where transactions is a list of
-    {date, description, amount_cents} dicts."""
+    """Returns (account_name, transactions, closing_balance_cents).
+    transactions is a list of {date, description, amount_cents} dicts.
+    closing_balance_cents is the statement's own printed "SALDO FINALE"
+    (None if it couldn't be found, e.g. a layout change) -- callers use it to
+    verify the import against the bank's own numbers rather than trusting
+    the parse blindly (see reconcile.reconcile_statement)."""
     transactions = []
     layout = None
+    closing_balance_cents = None
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages):
             lines = extract_lines(page)
@@ -113,7 +119,11 @@ def parse_pdf(pdf_path: str):
             )
             if header_idx is None:
                 continue
-            table_lines = cut_before_marker(lines[header_idx + layout["header_lines_to_skip"] :], "SALDO FINALE")
+            lines_after_header = lines[header_idx + layout["header_lines_to_skip"] :]
+            balance = find_marker_amount_cents(lines_after_header, "SALDO FINALE")
+            if balance is not None:
+                closing_balance_cents = balance
+            table_lines = cut_before_marker(lines_after_header, "SALDO FINALE")
             rows = group_transaction_rows(
                 table_lines, _is_anchor, lambda line, layout=layout: _build_anchor(line, layout)
             )
@@ -127,12 +137,12 @@ def parse_pdf(pdf_path: str):
                 )
                 description = clean_description(row["desc_words"]) or "(senza descrizione)"
                 transactions.append({"date": row["date"], "description": description, "amount_cents": amount_cents})
-    return layout["account_name"], transactions
+    return layout["account_name"], transactions, closing_balance_cents
 
 
 def import_pdf(conn: sqlite3.Connection, pdf_path: str) -> dict:
     summary = {"inserted": 0, "duplicates": 0, "categorized": 0, "needs_category": 0, "account_name": None}
-    account_name, txs = parse_pdf(pdf_path)
+    account_name, txs, _closing_balance_cents = parse_pdf(pdf_path)
     summary["account_name"] = account_name
     account_id = get_account_id(conn, account_name)
     for tx in txs:

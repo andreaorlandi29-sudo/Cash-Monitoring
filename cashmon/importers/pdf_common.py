@@ -9,11 +9,16 @@ belongs to is inferred from whether the *next* anchor line already carries
 its own inline description -- see `group_transaction_rows`.
 """
 import re
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 MONEY_RE = re.compile(r"^-?\d{1,3}(?:\.\d{3})*,\d{2}$")
 FOREIGN_AMOUNT_RE = re.compile(r"^-?\d{1,3}(?:\.\d{3})*,\d{2}[A-Z]{2,4}$")
 RATIO_RE = re.compile(r"^-?\d+,\d{4,}$")
+# Summary lines (e.g. "SALDO FINALE") print their amount with an explicit
+# leading sign ("+2.780,64"), unlike the plain uscite/entrate transaction-table
+# columns MONEY_RE matches -- kept separate so find_marker_amount_cents can't
+# accidentally loosen what counts as a transaction amount elsewhere.
+SIGNED_MONEY_RE = re.compile(r"^[+-]?\d{1,3}(?:\.\d{3})*,\d{2}$")
 
 
 def looks_like_amount(text: str) -> bool:
@@ -138,6 +143,23 @@ def group_transaction_rows(
     pending.clear()
 
     return rows
+
+
+def find_marker_amount_cents(lines: List[dict], marker: str) -> Optional[int]:
+    """Finds the first line whose text starts with `marker` (matched like
+    cut_before_marker) and returns the last euro-shaped amount on that line,
+    in cents -- e.g. the closing balance on a "SALDO FINALE ... 1.234,56 €"
+    summary line. Returns None if the marker isn't found or carries no
+    recognizable amount, so callers can skip a balance check instead of
+    asserting a wrong one."""
+    marker_norm = marker.replace(" ", "").upper()
+    for line in lines:
+        if line["text"].replace(" ", "").upper().startswith(marker_norm):
+            amounts = [w["text"] for w in line["words"] if SIGNED_MONEY_RE.match(w["text"])]
+            if not amounts:
+                return None
+            return parse_italian_amount_to_cents(amounts[-1])
+    return None
 
 
 def cut_before_marker(lines: List[dict], marker: str) -> List[dict]:

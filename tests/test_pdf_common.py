@@ -1,5 +1,6 @@
 from cashmon.importers.pdf_common import (
     cut_before_marker,
+    find_marker_amount_cents,
     group_transaction_rows,
     looks_like_amount,
     parse_italian_amount_to_cents,
@@ -142,3 +143,26 @@ def test_cut_before_marker():
 def test_cut_before_marker_no_match_returns_all():
     lines = [line(1, [(0, "a")]), line(2, [(0, "b")])]
     assert cut_before_marker(lines, "NOPE") == lines
+
+
+def test_find_marker_amount_cents_reads_signed_closing_balance():
+    lines = [
+        line(1, [(0, "31/08/2026"), (1, "43"), (2, "Bar"), (3, "12,00")]),
+        line(2, [(0, "SALDO"), (1, "FINALE"), (2, "al"), (3, "31/08/2026"), (4, "+2.780,64")]),
+    ]
+    assert find_marker_amount_cents(lines, "SALDO FINALE") == 278064
+
+
+def test_find_marker_amount_cents_negative_balance():
+    lines = [line(1, [(0, "SALDO"), (1, "FINALE"), (2, "-150,00")])]
+    assert find_marker_amount_cents(lines, "SALDO FINALE") == -15000
+
+
+def test_find_marker_amount_cents_missing_marker_returns_none():
+    lines = [line(1, [(0, "a")])]
+    assert find_marker_amount_cents(lines, "SALDO FINALE") is None
+
+
+def test_find_marker_amount_cents_marker_without_amount_returns_none():
+    lines = [line(1, [(0, "SALDO"), (1, "FINALE"), (2, "non"), (3, "disponibile")])]
+    assert find_marker_amount_cents(lines, "SALDO FINALE") is None

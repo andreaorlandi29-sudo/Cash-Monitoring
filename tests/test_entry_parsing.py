@@ -4,6 +4,7 @@ from cashmon.bot.entry_parsing import (
     parse_projection,
     parse_projection_delete,
     parse_projection_modify,
+    parse_transaction_delete,
 )
 
 
@@ -122,6 +123,18 @@ def test_projection_delete_not_matched_by_other_parsers():
 
 def test_projection_delete_requires_a_plain_integer_id():
     assert parse_projection_delete("previsione elimina tre") is None
+
+
+def test_transaction_delete():
+    assert parse_transaction_delete("movimento elimina 7") == 7
+
+
+def test_transaction_delete_requires_a_plain_integer_id():
+    assert parse_transaction_delete("movimento elimina sette") is None
+
+
+def test_transaction_delete_not_matched_by_projection_delete():
+    assert parse_projection_delete("movimento elimina 7") is None
 
 
 def test_projection_modify():

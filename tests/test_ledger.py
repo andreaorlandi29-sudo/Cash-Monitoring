@@ -7,6 +7,7 @@ from cashmon.ledger import (
     balance_at,
     compute_import_hash,
     delete_projection,
+    delete_transaction,
     forecast_at,
     forecast_breakdown,
     get_account_id,
@@ -244,3 +245,47 @@ def test_compute_import_hash_is_stable_and_normalizes_description():
     h1 = compute_import_hash("csv_import", "2026-01-05", -5000, "esselunga  milano")
     h2 = compute_import_hash("csv_import", "2026-01-05", -5000, "ESSELUNGA MILANO")
     assert h1 == h2
+
+
+def test_delete_transaction_removes_a_manual_entry(seeded_conn, account_id):
+    result = add_transaction(seeded_conn, "2026-01-05", -350, "Bar", source="telegram", account_id=account_id, dedupe=False)
+    assert delete_transaction(seeded_conn, result.transaction_id) is True
+    row = seeded_conn.execute("SELECT id FROM transactions WHERE id = ?", (result.transaction_id,)).fetchone()
+    assert row is None
+
+
+def test_delete_transaction_removes_its_pending_question(seeded_conn, account_id):
+    result = add_transaction(seeded_conn, "2026-01-05", -350, "Bar", source="telegram", account_id=account_id, dedupe=False)
+    seeded_conn.execute(
+        "INSERT INTO pending_questions (transaction_id, chat_id, message_id) VALUES (?, ?, ?)",
+        (result.transaction_id, 1, 1),
+    )
+    seeded_conn.commit()
+    assert delete_transaction(seeded_conn, result.transaction_id) is True
+    row = seeded_conn.execute(
+        "SELECT id FROM pending_questions WHERE transaction_id = ?", (result.transaction_id,)
+    ).fetchone()
+    assert row is None
+
+
+def test_delete_transaction_refuses_a_nonexistent_id(seeded_conn):
+    assert delete_transaction(seeded_conn, 999) is False
+
+
+def test_delete_transaction_refuses_an_authoritative_import(seeded_conn, account_id):
+    result = add_transaction(
+        seeded_conn, "2026-01-05", -5000, "ESSELUNGA MILANO", source="findomestic_pdf", account_id=account_id
+    )
+    assert delete_transaction(seeded_conn, result.transaction_id) is False
+    row = seeded_conn.execute("SELECT id FROM transactions WHERE id = ?", (result.transaction_id,)).fetchone()
+    assert row is not None
+
+
+def test_delete_transaction_refuses_a_row_matched_to_a_projection(seeded_conn, account_id):
+    projection_id = add_projection(seeded_conn, "2026-02-01", -30000, "Affitto previsto")
+    result = add_transaction(seeded_conn, "2026-02-01", -30000, "Affitto reale", source="telegram", account_id=account_id, dedupe=False)
+    match_projection(seeded_conn, projection_id, result.transaction_id)
+
+    assert delete_transaction(seeded_conn, result.transaction_id) is False
+    row = seeded_conn.execute("SELECT id FROM transactions WHERE id = ?", (result.transaction_id,)).fetchone()
+    assert row is not None

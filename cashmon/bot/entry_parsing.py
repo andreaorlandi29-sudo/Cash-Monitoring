@@ -25,6 +25,11 @@ Formats:
   "previsione modifica 3 spesa 160 il 2026-10-10 Rata condominio"
                                      -- replaces projection #3's fields
                                         entirely (not a partial edit)
+  "movimento elimina 7"             -- deletes manually-entered movement #7
+                                        (typo/duplicate caught while
+                                        reconciling a statement -- see
+                                        cashmon.reconcile); refuses on an
+                                        authoritative statement/import row
 """
 import re
 from dataclasses import dataclass
@@ -38,6 +43,7 @@ PROJECTION_DELETE_RE = re.compile(r"^previsione\s+elimina\s+(\d+)$", re.IGNORECA
 PROJECTION_MODIFY_RE = re.compile(
     r"^previsione\s+modifica\s+(\d+)\s+(spesa|entrata)\s+([\d.,]+)\s+il\s+(\d{4}-\d{2}-\d{2})\s+(.+)$", re.IGNORECASE
 )
+TRANSACTION_DELETE_RE = re.compile(r"^movimento\s+elimina\s+(\d+)$", re.IGNORECASE)
 
 
 @dataclass
@@ -125,3 +131,11 @@ def parse_projection_modify(text: str):
         return None
     cents = -abs(cents) if kind.lower() == "spesa" else abs(cents)
     return ParsedProjectionEdit(projection_id=int(id_raw), date=date_str, amount_cents=cents, description=description)
+
+
+def parse_transaction_delete(text: str):
+    """Returns the transaction id to delete (e.g. a wrongly-entered manual
+    movement caught during statement reconciliation), or None if `text`
+    doesn't match."""
+    match = TRANSACTION_DELETE_RE.match(text.strip())
+    return int(match.group(1)) if match else None
