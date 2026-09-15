@@ -1,8 +1,23 @@
 -- Cash Monitoring schema. Money is always stored as integer cents.
 
+-- Legacy single-account config, kept only as a migration source: a database
+-- created before multi-account support wrote the (one) account's opening
+-- balance here. db.py's migration reads it once to create the matching row
+-- in `accounts` below, then current code never writes here again.
 CREATE TABLE IF NOT EXISTS config (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+-- Each real-world account being tracked (a checking account, a linked
+-- interest-bearing deposit account, ...). "Patrimonio" (total net worth) is
+-- the sum of every account's balance_at on a given date.
+CREATE TABLE IF NOT EXISTS accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    initial_balance_cents INTEGER NOT NULL,
+    initial_balance_date TEXT NOT NULL,    -- ISO 8601 YYYY-MM-DD
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Actual, real-world movements (bank statement imports, confirmed telegram entries,
@@ -20,6 +35,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     source TEXT NOT NULL,                  -- 'seed' | 'csv_import' | 'telegram' | 'nexi_card' | 'findomestic_pdf'
     import_hash TEXT UNIQUE,               -- dedup key; NULL allowed for rows that don't need it
     superseded_by_id INTEGER REFERENCES transactions(id),
+    account_id INTEGER REFERENCES accounts(id),
     -- 0 for rows that are itemized spend detail but not a separate movement of
     -- money out of the checking account (e.g. a Nexi credit-card line item --
     -- Nexi settles the whole month in one lump SDD debit ~2 months later,

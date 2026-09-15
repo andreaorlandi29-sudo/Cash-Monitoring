@@ -23,14 +23,19 @@ CATEGORIES = [
     "Bonifico",
     "Carta di Credito",
     "Satispay",
+    "Trasferimento interno",
     "Altro",
 ]
 
 # These categories are settlements of spend that's already itemized elsewhere
-# (a Nexi card's lump SDD debit, a Satispay weekly settlement) -- not a spend
-# category of their own. A future "spend by category" report should exclude
-# them to avoid double-counting the same money against the itemized rows.
-TRANSFER_CATEGORIES = {"Carta di Credito", "Satispay"}
+# (a Nexi card's lump SDD debit, a Satispay weekly settlement), or a transfer
+# between two of the user's own accounts (e.g. checking -> linked deposit
+# account) -- not a spend category of their own. A future "spend by category"
+# report should exclude them: a transfer nets to zero across accounts on its
+# own (both sides get this category, no explicit matching needed -- see
+# ledger.balance_at), and re-summing it as spend would double-count money
+# that's still the user's.
+TRANSFER_CATEGORIES = {"Carta di Credito", "Satispay", "Trasferimento interno"}
 
 # (pattern, category, priority) -- pattern is matched as a substring against the
 # normalized (uppercased, whitespace-collapsed) description.
@@ -73,6 +78,12 @@ SEED_RULES = [
     ("STIPENDIO", "Stipendio", SEED_PRIORITY),
     ("NEXI PAYMENTS", "Carta di Credito", SEED_PRIORITY),
     ("SATISPAY", "Satispay", SEED_PRIORITY),
+    # Transfers between the user's own Findomestic accounts (checking <->
+    # linked deposit account) -- narrow patterns on purpose, so a real cost
+    # charged on the deposit account itself (e.g. "Imposte e Tasse") is never
+    # swept in here by accident.
+    ("BASCULAMENTO", "Trasferimento interno", SEED_PRIORITY),
+    ("TRASFERIMENTO RESTO", "Trasferimento interno", SEED_PRIORITY),
     ("BONIFICO", "Bonifico", SEED_PRIORITY + 100),  # generic fallback, checked last
 ]
 

@@ -14,28 +14,28 @@ def write_csv(tmp_path, content=CSV_CONTENT):
     return str(path)
 
 
-def test_import_csv_inserts_and_categorizes(seeded_conn, tmp_path):
+def test_import_csv_inserts_and_categorizes(seeded_conn, account_id, tmp_path):
     seed_rules(seeded_conn)
     csv_path = write_csv(tmp_path)
     profile = load_profile("generic")
 
-    summary = import_csv(seeded_conn, csv_path, profile)
+    summary = import_csv(seeded_conn, csv_path, profile, account_id)
 
     assert summary["inserted"] == 2
     assert summary["duplicates"] == 0
     assert summary["categorized"] == 2  # ESSELUNGA -> Alimentari, STIPENDIO GENNAIO -> Stipendio
     assert summary["needs_category"] == 0
-    assert balance_at(seeded_conn, "2026-01-10") == 1_000_000 - 4530 + 150000
+    assert balance_at(seeded_conn, "2026-01-10", account_id) == 1_000_000 - 4530 + 150000
 
 
-def test_import_csv_is_idempotent(seeded_conn, tmp_path):
+def test_import_csv_is_idempotent(seeded_conn, account_id, tmp_path):
     seed_rules(seeded_conn)
     csv_path = write_csv(tmp_path)
     profile = load_profile("generic")
 
-    import_csv(seeded_conn, csv_path, profile)
-    summary = import_csv(seeded_conn, csv_path, profile)
+    import_csv(seeded_conn, csv_path, profile, account_id)
+    summary = import_csv(seeded_conn, csv_path, profile, account_id)
 
     assert summary["inserted"] == 0
     assert summary["duplicates"] == 2
-    assert balance_at(seeded_conn, "2026-01-10") == 1_000_000 - 4530 + 150000
+    assert balance_at(seeded_conn, "2026-01-10", account_id) == 1_000_000 - 4530 + 150000

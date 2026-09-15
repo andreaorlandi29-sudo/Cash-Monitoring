@@ -9,55 +9,77 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-def get_initial_balance_cents(conn: sqlite3.Connection) -> int:
-    row = conn.execute("SELECT value FROM config WHERE key = 'initial_balance_cents'").fetchone()
-    return int(row["value"]) if row else 0
+def get_account_id(conn: sqlite3.Connection, name: str) -> int:
+    row = conn.execute("SELECT id FROM accounts WHERE name = ?", (name,)).fetchone()
+    if row is None:
+        raise ValueError(f"Nessun conto chiamato {name!r}. Crealo con: python -m cashmon.seed --account {name!r} --balance ... --date ...")
+    return row["id"]
 
 
-def get_initial_balance_date(conn: sqlite3.Connection) -> str:
-    row = conn.execute("SELECT value FROM config WHERE key = 'initial_balance_date'").fetchone()
-    return row["value"] if row else "1970-01-01"
+def list_accounts(conn: sqlite3.Connection):
+    return conn.execute("SELECT id, name FROM accounts ORDER BY id").fetchall()
 
 
-def balance_at(conn: sqlite3.Connection, date: str) -> int:
-    """Real balance at `date`: initial balance plus every non-superseded actual
-    transaction on or before that date that represents real money movement
-    (counts_toward_balance=1 -- see the transactions table comment for why a
-    row can be excluded, e.g. an itemized Nexi card purchase whose cash
-    impact is recorded separately, as the lump monthly settlement)."""
-    initial = get_initial_balance_cents(conn)
+def get_initial_balance_cents(conn: sqlite3.Connection, account_id: int) -> int:
+    row = conn.execute("SELECT initial_balance_cents FROM accounts WHERE id = ?", (account_id,)).fetchone()
+    return row["initial_balance_cents"] if row else 0
+
+
+def get_initial_balance_date(conn: sqlite3.Connection, account_id: int) -> str:
+    row = conn.execute("SELECT initial_balance_date FROM accounts WHERE id = ?", (account_id,)).fetchone()
+    return row["initial_balance_date"] if row else "1970-01-01"
+
+
+def balance_at(conn: sqlite3.Connection, date: str, account_id: int) -> int:
+    """Real balance of one account at `date`: its initial balance plus every
+    non-superseded actual transaction on or before that date that represents
+    real money movement (counts_toward_balance=1 -- see the transactions
+    table comment for why a row can be excluded, e.g. an itemized Nexi card
+    purchase whose cash impact is recorded separately, as the lump monthly
+    settlement; or a transfer between two of the user's own accounts, tagged
+    "Trasferimento interno" on both sides, which nets to zero across
+    accounts without needing to link the two rows together)."""
+    initial = get_initial_balance_cents(conn, account_id)
     row = conn.execute(
         """
         SELECT COALESCE(SUM(amount_cents), 0) AS total
         FROM transactions
-        WHERE date <= ? AND superseded_by_id IS NULL AND counts_toward_balance = 1
+        WHERE date <= ? AND account_id = ? AND superseded_by_id IS NULL AND counts_toward_balance = 1
         """,
-        (date,),
+        (date, account_id),
     ).fetchone()
     return initial + row["total"]
 
 
-def get_last_actual_date(conn: sqlite3.Connection) -> str:
+def total_balance_at(conn: sqlite3.Connection, date: str) -> int:
+    """Total patrimonio at `date`: the sum of every tracked account's balance."""
+    return sum(balance_at(conn, date, row["id"]) for row in list_accounts(conn))
+
+
+def get_last_actual_date(conn: sqlite3.Connection, account_id: int) -> str:
     row = conn.execute(
         """
         SELECT MAX(date) AS last_date FROM transactions
-        WHERE superseded_by_id IS NULL AND counts_toward_balance = 1
-        """
+        WHERE account_id = ? AND superseded_by_id IS NULL AND counts_toward_balance = 1
+        """,
+        (account_id,),
     ).fetchone()
-    return row["last_date"] or get_initial_balance_date(conn)
+    return row["last_date"] or get_initial_balance_date(conn, account_id)
 
 
-def forecast_at(conn: sqlite3.Connection, date: str) -> int:
-    """Forecast balance at `date`: the real balance as of the last actual
-    transaction, plus every still-unmatched projection up to `date`.
+def forecast_at(conn: sqlite3.Connection, date: str, account_id: int) -> int:
+    """Forecast balance of one account at `date`: its real balance as of its
+    last actual transaction, plus every still-unmatched projection up to
+    `date`. Projections aren't tagged to an account yet (they're unused in
+    practice so far), so all of them apply here regardless of account.
 
     A projection stops contributing once it is matched to a real transaction
     (matched_transaction_id set) -- it is never deleted, so "overwriting" a
     projection with actual data is an aggregation effect, not a destructive
     write, and forecast-vs-actual stays comparable after the fact.
     """
-    last_actual = get_last_actual_date(conn)
-    base = balance_at(conn, last_actual)
+    last_actual = get_last_actual_date(conn, account_id)
+    base = balance_at(conn, last_actual, account_id)
     row = conn.execute(
         """
         SELECT COALESCE(SUM(amount_cents), 0) AS total
@@ -93,6 +115,7 @@ def add_transaction(
     amount_cents: int,
     description: str,
     source: str,
+    account_id: int,
     category: Optional[str] = None,
     status: str = "confirmed",
     import_hash: Optional[str] = None,
@@ -118,10 +141,10 @@ def add_transaction(
     try:
         cur = conn.execute(
             """
-            INSERT INTO transactions (date, amount_cents, description, category, status, source, import_hash, counts_toward_balance)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO transactions (date, amount_cents, description, category, status, source, import_hash, counts_toward_balance, account_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (date, amount_cents, description, category, status, source, import_hash, counts_toward_balance),
+            (date, amount_cents, description, category, status, source, import_hash, counts_toward_balance, account_id),
         )
         conn.commit()
         return InsertResult(transaction_id=cur.lastrowid, inserted=True)

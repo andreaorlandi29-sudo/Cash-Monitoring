@@ -22,7 +22,8 @@ from typing import Optional
 from cashmon import config as app_config
 from cashmon import db
 from cashmon.categorizer import categorize
-from cashmon.ledger import add_transaction
+from cashmon.ledger import add_transaction, get_account_id
+from cashmon.seed import DEFAULT_ACCOUNT_NAME
 
 PROFILES_DIR = Path(__file__).resolve().parent / "profiles"
 
@@ -46,7 +47,7 @@ def parse_amount_to_cents(raw: str, decimal_sep: str, thousands_sep: str) -> int
     return round(float(value) * 100)
 
 
-def import_csv(conn: sqlite3.Connection, csv_path: str, profile: dict) -> dict:
+def import_csv(conn: sqlite3.Connection, csv_path: str, profile: dict, account_id: int) -> dict:
     """Returns a summary dict: {"inserted": N, "duplicates": N, "categorized": N, "needs_category": N}."""
     summary = {"inserted": 0, "duplicates": 0, "categorized": 0, "needs_category": 0}
     decimal_sep = profile.get("decimal_separator", ".")
@@ -76,6 +77,7 @@ def import_csv(conn: sqlite3.Connection, csv_path: str, profile: dict) -> dict:
                 amount_cents=amount_cents,
                 description=description,
                 source="csv_import",
+                account_id=account_id,
                 category=category,
                 status="confirmed",
             )
@@ -95,11 +97,14 @@ def main() -> None:
     parser.add_argument("csv_path")
     parser.add_argument("--profile", default="generic")
     parser.add_argument("--db", default=app_config.DB_PATH)
+    parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Conto su cui registrare i movimenti")
     args = parser.parse_args()
 
     conn = db.connect(args.db)
+    db.init_schema(conn)
+    account_id = get_account_id(conn, args.account)
     profile = load_profile(args.profile)
-    summary = import_csv(conn, args.csv_path, profile)
+    summary = import_csv(conn, args.csv_path, profile, account_id)
     print(
         f"Importate {summary['inserted']} righe nuove "
         f"({summary['categorized']} categorizzate, {summary['needs_category']} da categorizzare), "

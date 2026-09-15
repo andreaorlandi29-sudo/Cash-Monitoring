@@ -7,7 +7,11 @@ categorizzazione automatica, e proiezioni future che vengono "sovrascritte"
 
 ## Come funziona
 
-- **`transactions`**: movimenti reali (da import CSV, da Telegram, saldo iniziale).
+- **`accounts`**: ogni conto tracciato (conto corrente, un conto deposito
+  collegato, ...) con il proprio saldo iniziale. Il "patrimonio" totale è la
+  somma del saldo di tutti i conti a una data — non solo il conto corrente.
+- **`transactions`**: movimenti reali (da import CSV, da Telegram, saldo iniziale),
+  ciascuno legato a un conto (`account_id`).
 - **`projections`**: movimenti attesi futuri. Non vengono mai cancellati: quando
   arriva il movimento reale corrispondente vengono "agganciati" (`matched_transaction_id`)
   e smettono di contribuire alla proiezione, ma restano a disposizione per
@@ -30,15 +34,36 @@ pip install -r requirements-dev.txt   # o requirements.txt per solo runtime
 cp .env.example .env
 ```
 
-Inizializza il database con il saldo di partenza (default 10.000 €, usato qui
-come dato di test):
+Inizializza il database con il saldo di partenza del conto corrente (default
+10.000 €, usato qui come dato di test):
 
 ```bash
 python -m cashmon.seed --balance 10000 --date 2026-01-01
 ```
 
 Rilanciabile in sicurezza: non azzera i movimenti già presenti, aggiorna solo
-il saldo iniziale e le regole di categorizzazione mancanti.
+il saldo iniziale (di quel conto) e le regole di categorizzazione mancanti.
+
+Per tracciare **un conto in più** (es. un conto deposito collegato), lancia
+`seed` di nuovo con `--account` e il suo saldo iniziale — il nome del conto è
+libero, ma se importi da Findomestic/PDF deve combaciare esattamente con
+quello che il parser si aspetta (vedi sotto):
+
+```bash
+python -m cashmon.seed --account "Findomestic Conto Deposito" --balance 13340.22 --date 2026-08-03
+```
+
+`/saldo` mostrerà da quel momento entrambi i conti più il totale.
+
+**Se il database esiste già** da prima che esistesse il multi-conto: non
+serve fare nulla a mano. Al primo avvio (bot o un qualsiasi comando), il
+conto che avevi viene rinominato automaticamente "Findomestic Conto
+Corrente" con lo stesso saldo e la stessa storia — nessun movimento o
+categoria già inserita va perso. Fai comunque una copia di sicurezza prima:
+```bash
+cp cashmon.db cashmon.backup.db
+```
+(il nome deve finire in `.db` per restare escluso da git, come già `cashmon.db`).
 
 ## Test
 
@@ -49,8 +74,11 @@ PYTHONPATH=. pytest -q
 ## Importare un estratto conto (CSV)
 
 ```bash
-python -m cashmon.importers.csv_importer percorso/estratto.csv --profile generic
+python -m cashmon.importers.csv_importer percorso/estratto.csv --profile generic --account "Findomestic Conto Corrente"
 ```
+
+`--account` è opzionale (default il conto corrente) — usalo per importare su
+un conto diverso, che deve già esistere (vedi `cashmon.seed --account` sopra).
 
 Il formato atteso dal profilo `generic` è un CSV con colonne `data,descrizione,importo`
 (data `YYYY-MM-DD`, importo con segno, `.` come separatore decimale) — comodo
@@ -102,10 +130,26 @@ python -m cashmon.importers.pdf_findomestic percorso/estratto_conto.pdf
 python -m cashmon.importers.pdf_nexi percorso/estratto_nexi.pdf
 ```
 
-**Findomestic (conto corrente)**: ogni riga viene importata come movimento
-reale, con segno da colonna Uscite/Entrate. L'accredito stipendio, i
-bonifici, gli addebiti SDD e l'addebito unico Nexi/Satispay finiscono tutti
-qui e contano sul saldo.
+**Findomestic (conto corrente o conto deposito)**: lo stesso comando
+riconosce da solo quale dei due è, leggendo il titolo del PDF ("Estratto
+Conto" vs "Estratto Conto Deposito"), e importa sul conto corrispondente —
+che deve già esistere con quel nome esatto (`Findomestic Conto Corrente` /
+`Findomestic Conto Deposito`), creato con `cashmon.seed --account`. Ogni riga
+viene importata come movimento reale, con segno da colonna Uscite/Entrate.
+L'accredito stipendio, i bonifici, gli addebiti SDD e l'addebito unico
+Nexi/Satispay contano sul saldo del conto su cui compaiono.
+
+Se hai un conto deposito collegato che riceve automaticamente una quota ad
+ogni utilizzo della carta di debito ("trasferimento resto"), quelle righe
+vengono riconosciute su entrambi gli estratti e categorizzate
+**"Trasferimento interno"** — non è spesa, sono soldi tuoi che si spostano
+tra due conti tuoi. Non serve "abbinare" manualmente le due righe (uscita sul
+corrente, entrata sul deposito): bastano import separati di entrambi gli
+estratti, ciascuno sul proprio conto, e la somma tra i conti si annulla da
+sola. Lo stesso vale per il grande trasferimento iniziale ("basculamento") con
+cui la banca gira periodicamente fondi tra i due conti. Un costo reale
+addebitato sul conto deposito (es. "Imposte e Tasse" sugli interessi) **non**
+viene toccato da questa regola — resta una spesa vera da categorizzare.
 
 **Nexi (carta di credito a saldo)**: la carta NON addebita subito il conto —
 Nexi salda l'intero estratto in un unico addebito SDD circa 2 mesi dopo (lo
@@ -153,8 +197,11 @@ frattempo).
 
 Comandi disponibili:
 
-- `/saldo` — saldo reale attuale
-- `/proiezione [giorni]` — saldo previsto tra N giorni (default 30)
+- `/saldo` — saldo reale di ogni conto tracciato, più il patrimonio totale se
+  ne hai più di uno
+- `/proiezione [giorni]` — saldo previsto tra N giorni (default 30) sul conto
+  corrente
+- `/categorizza` — smaltisce le spese senza categoria una alla volta
 
 Testo libero per registrare un movimento:
 

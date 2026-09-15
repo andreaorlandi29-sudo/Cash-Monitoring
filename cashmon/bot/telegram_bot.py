@@ -41,7 +41,8 @@ from cashmon import db
 from cashmon.bot.entry_parsing import parse_entry
 from cashmon.bot.formatting import format_eur
 from cashmon.categorizer import CATEGORIES, categorize, learn_rule
-from cashmon.ledger import add_transaction, balance_at, forecast_at
+from cashmon.ledger import add_transaction, balance_at, forecast_at, get_account_id, list_accounts, total_balance_at
+from cashmon.seed import DEFAULT_ACCOUNT_NAME
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -85,13 +86,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def saldo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conn = context.bot_data["conn"]
     today = date.today().isoformat()
-    cents = balance_at(conn, today)
-    await update.effective_message.reply_text(f"Saldo attuale: {format_eur(cents)}")
+    accounts = list_accounts(conn)
+    lines = [f"{acc['name']}: {format_eur(balance_at(conn, today, acc['id']))}" for acc in accounts]
+    if len(accounts) > 1:
+        lines.append(f"Totale patrimonio: {format_eur(total_balance_at(conn, today))}")
+    await update.effective_message.reply_text("\n".join(lines))
 
 
 @owner_only
 async def proiezione(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conn = context.bot_data["conn"]
+    account_id = context.bot_data["checking_account_id"]
     days = 30
     if context.args:
         try:
@@ -100,9 +105,9 @@ async def proiezione(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             await update.effective_message.reply_text("Uso: /proiezione [giorni]")
             return
     target_date = (date.today() + timedelta(days=days)).isoformat()
-    cents = forecast_at(conn, target_date)
+    cents = forecast_at(conn, target_date, account_id)
     await update.effective_message.reply_text(
-        f"Saldo previsto tra {days} giorni ({target_date}): {format_eur(cents)}"
+        f"Saldo previsto tra {days} giorni ({target_date}) sul conto corrente: {format_eur(cents)}"
     )
 
 
@@ -181,6 +186,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         amount_cents=entry.amount_cents,
         description=entry.description,
         source=entry.source,
+        account_id=context.bot_data["checking_account_id"],
         category=category,
         status="confirmed",
         counts_toward_balance=entry.counts_toward_balance,
@@ -237,6 +243,7 @@ def build_application() -> Application:
 
     application = Application.builder().token(app_config.TELEGRAM_BOT_TOKEN).build()
     application.bot_data["conn"] = conn
+    application.bot_data["checking_account_id"] = get_account_id(conn, DEFAULT_ACCOUNT_NAME)
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("saldo", saldo))
