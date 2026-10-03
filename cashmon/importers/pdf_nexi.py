@@ -28,7 +28,8 @@ from cashmon.importers.pdf_common import (
     looks_like_amount,
     parse_italian_amount_to_cents,
 )
-from cashmon.ledger import add_transaction
+from cashmon.ledger import add_transaction, get_account_id
+from cashmon.seed import DEFAULT_ACCOUNT_NAME
 
 DATE_RE = re.compile(r"^\d{2}/\d{2}/\d{2}$")
 TABLE_HEADER_MARKER = "DETTAGLIODEISUOIMOVIMENTI"
@@ -94,8 +95,13 @@ def parse_pdf(pdf_path: str) -> list:
     return transactions
 
 
-def import_pdf(conn: sqlite3.Connection, pdf_path: str) -> dict:
+def import_pdf(conn: sqlite3.Connection, pdf_path: str, account_name: str = DEFAULT_ACCOUNT_NAME) -> dict:
+    """`account_name` is only a tag (this is informational spend detail,
+    counts_toward_balance=0 means it never contributes to that account's
+    balance) -- defaults to the checking account, which is where the lump
+    settlement eventually lands."""
     summary = {"inserted": 0, "duplicates": 0, "categorized": 0, "needs_category": 0}
+    account_id = get_account_id(conn, account_name)
     for tx in parse_pdf(pdf_path):
         category = categorize(conn, tx["description"])
         result = add_transaction(
@@ -104,6 +110,7 @@ def import_pdf(conn: sqlite3.Connection, pdf_path: str) -> dict:
             amount_cents=tx["amount_cents"],
             description=tx["description"],
             source="nexi_card",
+            account_id=account_id,
             category=category,
             status="confirmed",
             counts_toward_balance=0,
@@ -123,6 +130,7 @@ def main() -> None:
     args = parser.parse_args()
 
     conn = db.connect(args.db)
+    db.init_schema(conn)
     summary = import_pdf(conn, args.pdf_path)
     print(
         f"Importate {summary['inserted']} spese carta "

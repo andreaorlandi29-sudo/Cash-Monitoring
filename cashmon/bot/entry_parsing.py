@@ -14,6 +14,22 @@ Formats:
                                          doesn't land in the checking account
                                          either -- it's usable Satispay
                                          credit until next week's netting
+  "previsione spesa 150 il 2026-10-05 Rata condominio"
+                                     -- a planned future expense/income for a
+                                        known date (one date per message --
+                                        four installments is four messages)
+  "previsione saldo al 2026-12-01"  -- asks for a projected balance (see
+                                        ledger.forecast_breakdown)
+  "previsione elimina 3"            -- deletes pending projection #3 (see
+                                        /previsioni for the list of ids)
+  "previsione modifica 3 spesa 160 il 2026-10-10 Rata condominio"
+                                     -- replaces projection #3's fields
+                                        entirely (not a partial edit)
+  "movimento elimina 7"             -- deletes manually-entered movement #7
+                                        (typo/duplicate caught while
+                                        reconciling a statement -- see
+                                        cashmon.reconcile); refuses on an
+                                        authoritative statement/import row
 """
 import re
 from dataclasses import dataclass
@@ -21,6 +37,13 @@ from dataclasses import dataclass
 from cashmon.bot.formatting import parse_amount_to_cents
 
 ENTRY_RE = re.compile(r"^(?:(satispay)\s+)?(spesa|entrata)\s+([\d.,]+)\s+(.+)$", re.IGNORECASE)
+PROJECTION_RE = re.compile(r"^previsione\s+(spesa|entrata)\s+([\d.,]+)\s+il\s+(\d{4}-\d{2}-\d{2})\s+(.+)$", re.IGNORECASE)
+BALANCE_FORECAST_RE = re.compile(r"^previsione\s+saldo\s+al\s+(\d{4}-\d{2}-\d{2})$", re.IGNORECASE)
+PROJECTION_DELETE_RE = re.compile(r"^previsione\s+elimina\s+(\d+)$", re.IGNORECASE)
+PROJECTION_MODIFY_RE = re.compile(
+    r"^previsione\s+modifica\s+(\d+)\s+(spesa|entrata)\s+([\d.,]+)\s+il\s+(\d{4}-\d{2}-\d{2})\s+(.+)$", re.IGNORECASE
+)
+TRANSACTION_DELETE_RE = re.compile(r"^movimento\s+elimina\s+(\d+)$", re.IGNORECASE)
 
 
 @dataclass
@@ -47,3 +70,72 @@ def parse_entry(text: str):
     if satispay_prefix:
         return ParsedEntry(amount_cents=cents, description=description, source="satispay", counts_toward_balance=0)
     return ParsedEntry(amount_cents=cents, description=description, source="telegram", counts_toward_balance=1)
+
+
+@dataclass
+class ParsedProjection:
+    date: str  # ISO 8601 YYYY-MM-DD
+    amount_cents: int  # signed: negative for spesa, positive for entrata
+    description: str
+
+
+def parse_projection(text: str):
+    """Returns a ParsedProjection, or None if `text` doesn't match. A plain
+    "spesa"/"entrata" (no "previsione" prefix) never matches this -- the two
+    formats are mutually exclusive by construction, not by handler ordering."""
+    match = PROJECTION_RE.match(text.strip())
+    if not match:
+        return None
+
+    kind, amount_raw, date_str, description = match.groups()
+    try:
+        cents = parse_amount_to_cents(amount_raw)
+    except ValueError:
+        return None
+    cents = -abs(cents) if kind.lower() == "spesa" else abs(cents)
+    return ParsedProjection(date=date_str, amount_cents=cents, description=description)
+
+
+def parse_balance_forecast_request(text: str):
+    """Returns the target date (YYYY-MM-DD) for a "previsione saldo al ..."
+    request, or None if `text` doesn't match."""
+    match = BALANCE_FORECAST_RE.match(text.strip())
+    return match.group(1) if match else None
+
+
+def parse_projection_delete(text: str):
+    """Returns the projection id to delete, or None if `text` doesn't match."""
+    match = PROJECTION_DELETE_RE.match(text.strip())
+    return int(match.group(1)) if match else None
+
+
+@dataclass
+class ParsedProjectionEdit:
+    projection_id: int
+    date: str
+    amount_cents: int
+    description: str
+
+
+def parse_projection_modify(text: str):
+    """Returns a ParsedProjectionEdit (a full replacement of the projection's
+    fields, not a partial edit), or None if `text` doesn't match."""
+    match = PROJECTION_MODIFY_RE.match(text.strip())
+    if not match:
+        return None
+
+    id_raw, kind, amount_raw, date_str, description = match.groups()
+    try:
+        cents = parse_amount_to_cents(amount_raw)
+    except ValueError:
+        return None
+    cents = -abs(cents) if kind.lower() == "spesa" else abs(cents)
+    return ParsedProjectionEdit(projection_id=int(id_raw), date=date_str, amount_cents=cents, description=description)
+
+
+def parse_transaction_delete(text: str):
+    """Returns the transaction id to delete (e.g. a wrongly-entered manual
+    movement caught during statement reconciliation), or None if `text`
+    doesn't match."""
+    match = TRANSACTION_DELETE_RE.match(text.strip())
+    return int(match.group(1)) if match else None

@@ -7,7 +7,11 @@ categorizzazione automatica, e proiezioni future che vengono "sovrascritte"
 
 ## Come funziona
 
-- **`transactions`**: movimenti reali (da import CSV, da Telegram, saldo iniziale).
+- **`accounts`**: ogni conto tracciato (conto corrente, un conto deposito
+  collegato, ...) con il proprio saldo iniziale. Il "patrimonio" totale è la
+  somma del saldo di tutti i conti a una data — non solo il conto corrente.
+- **`transactions`**: movimenti reali (da import CSV, da Telegram, saldo iniziale),
+  ciascuno legato a un conto (`account_id`).
 - **`projections`**: movimenti attesi futuri. Non vengono mai cancellati: quando
   arriva il movimento reale corrispondente vengono "agganciati" (`matched_transaction_id`)
   e smettono di contribuire alla proiezione, ma restano a disposizione per
@@ -15,7 +19,12 @@ categorizzazione automatica, e proiezioni future che vengono "sovrascritte"
 - **`categorization_rules`**: regole di categorizzazione automatica (per
   sottostringa sulla descrizione normalizzata). Le risposte date via Telegram
   vengono salvate come nuove regole, quindi lo stesso esercente non viene più
-  richiesto una seconda volta.
+  richiesto una seconda volta. Se aggiungi una nuova regola (es. un nuovo
+  esercente/categoria in `cashmon/categorizer.py`) che avrebbe già dovuto
+  matchare movimenti importati in passato, lancia
+  `python -m cashmon.recategorize` per applicarla retroattivamente invece di
+  ricategorizzare a mano dal bot ogni riga già presente (non tocca mai una
+  riga già categorizzata).
 - Ogni importo è salvato come **centesimi interi** (mai float).
 - Ogni riga importata ha un **hash di deduplica** (fonte + data + importo +
   descrizione normalizzata): reimportare lo stesso estratto conto è
@@ -30,15 +39,36 @@ pip install -r requirements-dev.txt   # o requirements.txt per solo runtime
 cp .env.example .env
 ```
 
-Inizializza il database con il saldo di partenza (default 10.000 €, usato qui
-come dato di test):
+Inizializza il database con il saldo di partenza del conto corrente (default
+10.000 €, usato qui come dato di test):
 
 ```bash
 python -m cashmon.seed --balance 10000 --date 2026-01-01
 ```
 
 Rilanciabile in sicurezza: non azzera i movimenti già presenti, aggiorna solo
-il saldo iniziale e le regole di categorizzazione mancanti.
+il saldo iniziale (di quel conto) e le regole di categorizzazione mancanti.
+
+Per tracciare **un conto in più** (es. un conto deposito collegato), lancia
+`seed` di nuovo con `--account` e il suo saldo iniziale — il nome del conto è
+libero, ma se importi da Findomestic/PDF deve combaciare esattamente con
+quello che il parser si aspetta (vedi sotto):
+
+```bash
+python -m cashmon.seed --account "Findomestic Conto Deposito" --balance 13340.22 --date 2026-08-03
+```
+
+`/saldo` mostrerà da quel momento entrambi i conti più il totale.
+
+**Se il database esiste già** da prima che esistesse il multi-conto: non
+serve fare nulla a mano. Al primo avvio (bot o un qualsiasi comando), il
+conto che avevi viene rinominato automaticamente "Findomestic Conto
+Corrente" con lo stesso saldo e la stessa storia — nessun movimento o
+categoria già inserita va perso. Fai comunque una copia di sicurezza prima:
+```bash
+cp cashmon.db cashmon.backup.db
+```
+(il nome deve finire in `.db` per restare escluso da git, come già `cashmon.db`).
 
 ## Test
 
@@ -49,8 +79,11 @@ PYTHONPATH=. pytest -q
 ## Importare un estratto conto (CSV)
 
 ```bash
-python -m cashmon.importers.csv_importer percorso/estratto.csv --profile generic
+python -m cashmon.importers.csv_importer percorso/estratto.csv --profile generic --account "Findomestic Conto Corrente"
 ```
+
+`--account` è opzionale (default il conto corrente) — usalo per importare su
+un conto diverso, che deve già esistere (vedi `cashmon.seed --account` sopra).
 
 Il formato atteso dal profilo `generic` è un CSV con colonne `data,descrizione,importo`
 (data `YYYY-MM-DD`, importo con segno, `.` come separatore decimale) — comodo
@@ -102,10 +135,26 @@ python -m cashmon.importers.pdf_findomestic percorso/estratto_conto.pdf
 python -m cashmon.importers.pdf_nexi percorso/estratto_nexi.pdf
 ```
 
-**Findomestic (conto corrente)**: ogni riga viene importata come movimento
-reale, con segno da colonna Uscite/Entrate. L'accredito stipendio, i
-bonifici, gli addebiti SDD e l'addebito unico Nexi/Satispay finiscono tutti
-qui e contano sul saldo.
+**Findomestic (conto corrente o conto deposito)**: lo stesso comando
+riconosce da solo quale dei due è, leggendo il titolo del PDF ("Estratto
+Conto" vs "Estratto Conto Deposito"), e importa sul conto corrispondente —
+che deve già esistere con quel nome esatto (`Findomestic Conto Corrente` /
+`Findomestic Conto Deposito`), creato con `cashmon.seed --account`. Ogni riga
+viene importata come movimento reale, con segno da colonna Uscite/Entrate.
+L'accredito stipendio, i bonifici, gli addebiti SDD e l'addebito unico
+Nexi/Satispay contano sul saldo del conto su cui compaiono.
+
+Se hai un conto deposito collegato che riceve automaticamente una quota ad
+ogni utilizzo della carta di debito ("trasferimento resto"), quelle righe
+vengono riconosciute su entrambi gli estratti e categorizzate
+**"Trasferimento interno"** — non è spesa, sono soldi tuoi che si spostano
+tra due conti tuoi. Non serve "abbinare" manualmente le due righe (uscita sul
+corrente, entrata sul deposito): bastano import separati di entrambi gli
+estratti, ciascuno sul proprio conto, e la somma tra i conti si annulla da
+sola. Lo stesso vale per il grande trasferimento iniziale ("basculamento") con
+cui la banca gira periodicamente fondi tra i due conti. Un costo reale
+addebitato sul conto deposito (es. "Imposte e Tasse" sugli interessi) **non**
+viene toccato da questa regola — resta una spesa vera da categorizzare.
 
 **Nexi (carta di credito a saldo)**: la carta NON addebita subito il conto —
 Nexi salda l'intero estratto in un unico addebito SDD circa 2 mesi dopo (lo
@@ -131,6 +180,23 @@ che non tornano: confronta sempre il riepilogo stampato a fine comando con i
 totali "Entrate complessive / Uscite complessive" (Findomestic) o "TOTALE
 SPESE" (Nexi) stampati sull'estratto conto stesso.
 
+### Riconciliazione con l'estratto conto (via Telegram)
+
+Invece della riga di comando, puoi mandare il PDF dell'estratto conto
+direttamente al bot come documento Telegram: lo riconosce da solo
+(Findomestic o Nexi) e lo importa.
+
+Per un estratto Findomestic (conto corrente o deposito), il bot fa anche la
+**quadratura**: ogni movimento inserito a mano via chat che trova una
+corrispondenza sull'estratto (stesso importo, data entro 5 giorni) viene
+collegato alla riga ufficiale, così non conta due volte; il saldo calcolato
+viene poi confrontato con il "SALDO FINALE" stampato sull'estratto stesso, e
+ogni movimento inserito a mano rimasto senza riscontro ti viene segnalato.
+Per correggere un movimento sbagliato o duplicato: `movimento elimina
+<numero>` (funziona solo sui movimenti inseriti a mano, mai su una riga
+importata da un estratto). Puoi anche controllare la situazione in qualsiasi
+momento, senza caricare un nuovo estratto, con `/riconcilia`.
+
 ## Bot Telegram
 
 1. Crea un bot con [@BotFather](https://t.me/BotFather) su Telegram, copia il
@@ -151,10 +217,43 @@ processo persistente (es. un free tier con worker sempre attivo — evita i
 free tier "serverless" che dormono, altrimenti perdi i messaggi nel
 frattempo).
 
-Comandi disponibili:
+### Capire il linguaggio discorsivo (opzionale)
 
-- `/saldo` — saldo reale attuale
-- `/proiezione [giorni]` — saldo previsto tra N giorni (default 30)
+Oltre ai formati rigidi qui sotto, il bot capisce anche frasi più libere —
+"ho speso 12 euro da Esselunga stamattina", "domani mi arrivano 1200 di
+stipendio", "quanto avrò a dicembre?" — appoggiandosi all'API di Claude
+(modulo `cashmon/bot/nlu.py`) **solo quando** il messaggio non combacia con
+nessun formato rigido: quelli restano gratuiti e vengono sempre provati
+per primi.
+
+Per attivarlo, crea una API key su [console.anthropic.com](https://console.anthropic.com)
+(Settings → API Keys) e aggiungila a `.env`:
+```
+ANTHROPIC_API_KEY=sk-ant-...
+```
+Richiede un metodo di pagamento collegato all'account (a differenza del bot
+Telegram, che è gratis) — controlla i consumi da Settings → Usage le prime
+volte. Con il modello di default (`claude-haiku-4-5`, cambiabile con
+`NLU_MODEL` in `.env`) il costo per messaggio interpretato è nell'ordine di
+frazioni di centesimo, adatto a un uso personale.
+
+**Senza questa chiave il bot funziona esattamente come prima**, semplicemente
+senza capire le frasi libere — non è un requisito, è un'aggiunta. Se il
+messaggio non è chiaro nemmeno per Claude (manca l'importo, non è chiaro se
+spesa o entrata, ecc.), il bot te lo dice e ti chiede di essere più preciso
+invece di indovinare.
+
+Comandi disponibili (compaiono anche nel menu "/" di Telegram vicino al
+campo di testo, con una breve descrizione — utile se te li dimentichi):
+
+- `/start` o `/help` — richiama in ogni momento questo stesso elenco più i
+  formati di testo libero
+- `/saldo` — saldo reale di ogni conto tracciato, più il patrimonio totale se
+  ne hai più di uno
+- `/proiezione [giorni]` — saldo previsto tra N giorni (default 30) sul conto
+  corrente
+- `/categorizza` — smaltisce le spese senza categoria una alla volta
+- `/previsioni` — elenca le previsioni in sospeso
 
 Testo libero per registrare un movimento:
 
@@ -172,6 +271,66 @@ identici (stesso importo, stessa descrizione, stesso giorno — capita spesso
 con Satispay, es. due caffè da 1,50 €) vengono registrati entrambi: la
 deduplica per hash ha senso solo per un file che potresti reimportare per
 sbaglio, non per due spese reali scritte a mano.
+
+### Previsioni future
+
+Per una spesa o un'entrata che sai già che arriverà in una data precisa (una
+rata condominiale, uno stipendio con data nota, ecc.):
+
+```
+previsione spesa 150 il 2026-10-05 Rata condominio
+previsione entrata 1200 il 2026-11-27 Tredicesima
+```
+
+Una data per messaggio — per più rate (es. 4 scadenze condominiali), manda 4
+messaggi, uno per ciascuna. La previsione resta visibile finché non arriva il
+movimento reale corrispondente sull'estratto conto: a quel punto puoi
+collegarla manualmente (`match_projection`, non ancora esposto via bot) così
+smette di contare due volte, oppure lasciarla — il suo effetto sul saldo
+attuale (`/saldo`) è comunque zero, conta solo per `/proiezione` e per
+"previsione saldo al ...".
+
+Per chiedere una proiezione a una data specifica, che combina saldo attuale +
+tutte le previsioni inserite + una stima automatica delle **Utenze** (bollette
+luce/gas/telefono) basata sulla media mensile degli ultimi 6 mesi:
+
+```
+previsione saldo al 2026-12-01
+```
+
+Risposta tipo:
+```
+Saldo oggi: 2.780,64 €
+Previsioni inserite: -150,00 €
+Utenze stimate (3 mesi × -68,50 € medi): -205,50 €
+Previsione al 2026-12-01: 2.424,14 €
+```
+
+Il mese di una bolletta Utenze già inserita come previsione esplicita **non**
+viene anche stimato dalla media (altrimenti conterebbe due volte) — solo i
+mesi ancora "scoperti" ricevono la stima automatica. Se hai meno di 3 mesi di
+storico Utenze, il bot te lo segnala esplicitamente ("poco affidabile") invece
+di darti un numero con falsa precisione.
+
+**Vedere, modificare o eliminare le previsioni inserite:**
+
+```
+/previsioni
+```
+
+elenca tutte le previsioni ancora in sospeso con un numero (`#3`, ecc.). Con
+quel numero:
+
+```
+previsione modifica 3 spesa 160 il 2026-10-10 Rata condominio
+previsione elimina 3
+```
+
+`modifica` sostituisce **tutti** i campi della previsione (non è una modifica
+parziale: riscrivi importo, data e descrizione anche se cambi solo uno dei
+tre). Una previsione già "realizzata" (collegata a un movimento reale importato
+— vedi sopra) non compare più in `/previsioni` e non può più essere modificata
+o eliminata: è storico, non più un piano.
 
 ### Satispay: come viene trattato
 
