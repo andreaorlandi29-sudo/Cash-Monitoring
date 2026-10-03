@@ -4,3 +4,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.log
+
+# Scratch output from one-off research tasks (deep-research skill), not project code.
+research_notes/
+reports/
